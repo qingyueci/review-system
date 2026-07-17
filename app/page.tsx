@@ -37,9 +37,20 @@ type Source = {
 type AnalysisResult = {
   analysis: string;
   sections: Record<string, string>;
+  tasks: AnalysisTask[];
   sources: Source[];
   document_base64: string;
   document_filename: string;
+};
+
+type AnalysisTask = {
+  stock: string;
+  origin: string;
+  original_task: string;
+  current_position: string;
+  relations: string;
+  success_signal: string;
+  failure_signal: string;
 };
 
 type Job = {
@@ -54,6 +65,18 @@ type HistoryDocument = {
   filename: string;
   modified_at: string;
   size: number;
+};
+
+type KnowledgePost = {
+  title: string;
+  published_at: string;
+  views: number;
+  reply_count: number;
+  likes: number;
+  scope: "top_year" | "recent_qa";
+  body_truncated: boolean;
+  capture_mode: string;
+  url: string;
 };
 
 const frameworkTasks: Task[] = [
@@ -187,6 +210,7 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [documents, setDocuments] = useState<HistoryDocument[]>([]);
+  const [knowledgePosts, setKnowledgePosts] = useState<KnowledgePost[]>([]);
 
   const evidence = analysis?.sources ?? [];
   const sections = analysis?.sections ?? {};
@@ -198,6 +222,8 @@ export default function Home() {
   const taskText = sections["个股任务表"];
   const tomorrowText = sections["明日竞价确认条件"];
   const failureText = sections["判断失效条件"];
+  const displayTasks =
+    analysis?.tasks.length ? analysis.tasks.slice(0, 4) : null;
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -231,6 +257,10 @@ export default function Home() {
       })
       .then((result) => {
         if (!cancelled && result) setDocuments(result.documents);
+        return requestLocal<{ posts: KnowledgePost[] }>(token, "/api/posts");
+      })
+      .then((result) => {
+        if (!cancelled && result) setKnowledgePosts(result.posts);
       })
       .catch(() => {
         if (!cancelled) setConnected(false);
@@ -361,6 +391,11 @@ export default function Home() {
       }
       if (job.status === "succeeded" && job.stats) {
         setStats(job.stats);
+        const refreshed = await requestLocal<{ posts: KnowledgePost[] }>(
+          token,
+          "/api/posts",
+        );
+        setKnowledgePosts(refreshed.posts);
         showNotice("自爬取、清洗和知识库更新已完成。");
       } else {
         showNotice(job.message || "知识库更新失败");
@@ -565,18 +600,44 @@ export default function Home() {
                     </div>
                     {layoutText && <div className="generated-analysis">{cleanMarkdown(layoutText)}</div>}
                     <div className="relationship-map" aria-label="个股任务关系框架示意图">
-                      {frameworkTasks.map((task) => (
-                        <button key={task.id} className={`map-node ${task.id} ${selectedId === task.id ? "selected" : ""}`} onClick={() => setSelectedId(task.id)}>
-                          <small>{task.role.slice(0, 2)}</small><strong>{task.name}</strong><span>{task.position}</span>
-                        </button>
-                      ))}
+                      {displayTasks
+                        ? displayTasks.map((task, index) => {
+                            const position = ["seed", "core", "anchor", "follower"][index];
+                            return (
+                              <button key={`${task.stock}-${index}`} className={`map-node ${position} ${selectedId === task.stock ? "selected" : ""}`} onClick={() => setSelectedId(task.stock)}>
+                                <small>{task.current_position || "任务节点"}</small>
+                                <strong>{task.stock}</strong>
+                                <span>{task.original_task}</span>
+                              </button>
+                            );
+                          })
+                        : frameworkTasks.map((task) => (
+                            <button key={task.id} className={`map-node ${task.id} ${selectedId === task.id ? "selected" : ""}`} onClick={() => setSelectedId(task.id)}>
+                              <small>{task.role.slice(0, 2)}</small><strong>{task.name}</strong><span>{task.position}</span>
+                            </button>
+                          ))}
                       <div className="relation-line line-a"><span>带动</span></div><div className="relation-line line-b"><span>反馈</span></div><div className="relation-line line-c"><span>验证</span></div>
                       <div className="map-center"><span>市场合力</span><strong>任务迁移</strong></div>
                     </div>
                   </section>
                   <section className="panel matrix-panel">
                     <div className="panel-heading"><div><span className="section-number">03</span><div><span className="eyebrow">个股任务</span><h3>模型提取的任务表</h3></div></div></div>
-                    <div className="task-output">{taskText ? cleanMarkdown(taskText) : "本次模型没有按指定标题输出任务表，请以完整分析和证据链为准。"}</div>
+                    {analysis.tasks.length ? (
+                      <div className="task-table-wrap">
+                        <table className="task-table analysis-task-table">
+                          <thead><tr><th>个股</th><th>首板出身</th><th>原始任务</th><th>当前地位</th><th>协同 / 压制</th><th>完成信号</th><th>失败信号</th></tr></thead>
+                          <tbody>
+                            {analysis.tasks.map((task, index) => (
+                              <tr key={`${task.stock}-${index}`} className={selectedId === task.stock ? "selected-row" : ""} onClick={() => setSelectedId(task.stock)}>
+                                <td><strong>{task.stock}</strong></td><td>{task.origin}</td><td>{task.original_task}</td><td>{task.current_position}</td><td>{task.relations}</td><td>{task.success_signal}</td><td>{task.failure_signal}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="task-output">{taskText ? cleanMarkdown(taskText) : "本次模型没有按指定格式输出任务表，请以完整分析和证据链为准。"}</div>
+                    )}
                   </section>
                   <section className="tomorrow-grid">
                     <article><span className="eyebrow">明日竞价确认</span><h3>完成任务需要出现什么</h3><p className="analysis-text">{tomorrowText ? cleanMarkdown(tomorrowText) : "资料不足"}</p></article>
@@ -610,6 +671,27 @@ export default function Home() {
                 <div className="cleaning-columns">
                   <div><strong>保留</strong><p>完整正文、本人有效回复、问题上下文、高赞且有布局信息的评论、人工体系文档。</p></div>
                   <div><strong>降权或过滤</strong><p>重复文本、空话、广告、过短回复、脱离布局语境的泛泛评论以及网页噪声。</p></div>
+                </div>
+              </section>
+              <section className="panel source-library-panel">
+                <div className="panel-heading">
+                  <div><span className="section-number">02</span><div><span className="eyebrow">采集明细</span><h3>已进入知识库的公开帖子</h3></div></div>
+                  <span className="hint">{knowledgePosts.length} 篇</span>
+                </div>
+                <div className="source-table-wrap">
+                  <table className="source-table">
+                    <thead><tr><th>标题</th><th>日期</th><th>浏览</th><th>评论</th><th>点赞</th><th>用途</th><th>正文</th></tr></thead>
+                    <tbody>
+                      {knowledgePosts.map((post) => (
+                        <tr key={post.url}>
+                          <td><a href={post.url} target="_blank" rel="noreferrer">{post.title}</a></td>
+                          <td>{post.published_at}</td><td>{post.views.toLocaleString()}</td><td>{post.reply_count.toLocaleString()}</td><td>{post.likes.toLocaleString()}</td>
+                          <td>{post.scope === "top_year" ? "高阅读量核心" : "近期问答补充"}</td>
+                          <td><span className={post.body_truncated ? "source-badge warning" : "source-badge"}>{post.body_truncated ? "公开节选" : "完整"}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </section>
             </>
