@@ -1,0 +1,26 @@
+# Codex 与本机状态
+.agents/
+.codex/
+*.log
+
+# 前端单独维护自己的 Git 历史
+review-cockpit-site/
+
+# Python 本地环境与缓存
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/*.py[cod]
+
+# 密钥、本机数据库和生成文件
+**/.env
+**/data/
+**/output/
+_output/
+
+# 用户原始复盘与策略资料不进入代码仓库
+2025/
+2026/
+*.docx
+*.xlsx
+*.xls
