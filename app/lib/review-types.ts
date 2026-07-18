@@ -17,6 +17,8 @@ export type Source = {
   source_url: string;
   excerpt: string;
   source_type: string;
+  retrieval_score?: number;
+  retrieval_mode?: string;
 };
 
 export type AnalysisTask = {
@@ -61,4 +63,25 @@ export type KnowledgePost = {
   body_truncated: boolean;
   capture_mode: string;
   url: string;
+};
+
+export type RunRecord = {
+  job_id: string;
+  status: "pending" | "running" | "succeeded" | "failed";
+  message: string;
+  review_date: string;
+  filename: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  retry_of: string;
+  branches: AnalysisResult["branches"];
+  sources: Array<{
+    title: string;
+    source_type: string;
+    source_url: string;
+    retrieval_score: number;
+  }>;
+  excel_filename: string;
+  document_filename: string;
 };

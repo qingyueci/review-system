@@ -25,7 +25,9 @@ export function KnowledgeSection({
         <div>
           <span className="eyebrow">本机 RAG 状态</span>
           <h3>{stats.chunks.toLocaleString()} 条证据已建立检索索引</h3>
-          <p>更新会自动完成发现、抓取、去重、清洗、分段和索引重建。</p>
+          <p>
+            更新会自动完成抓取与清洗；分析时使用关键词、本地向量、来源、时间和题材混合排序。
+          </p>
         </div>
         <button disabled={syncing} onClick={onSync}>
           {syncJob?.status === "running"

@@ -29,6 +29,8 @@ test("页面包含产品核心信息", () => {
   assert.match(appSource, /只生成 Excel/);
   assert.match(appSource, /只生成 Word/);
   assert.match(appSource, /只重试/);
+  assert.match(appSource, /运行记录/);
+  assert.match(appSource, /模型消耗/);
 });
 
 test("页面不再包含脚手架预览", () => {
@@ -40,6 +42,7 @@ test("耗时操作使用后台任务和进度轮询", () => {
   assert.match(appSource, /\/api\/fetch-review-async/);
   assert.match(appSource, /\/api\/analyze-async/);
   assert.match(appSource, /\/api\/jobs\/recent/);
+  assert.match(appSource, /\/api\/runs/);
   assert.match(appSource, /\/retry/);
   assert.match(appSource, /waitForJob/);
   assert.match(appSource, /review-active-generation/);

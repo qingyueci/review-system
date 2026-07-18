@@ -20,6 +20,7 @@ import {
   GenerationMode,
   HistoryDocument,
   KnowledgePost,
+  RunRecord,
   Source,
   Stats,
 } from "./lib/review-types";
@@ -94,6 +95,11 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
           source_url: asText(source.source_url),
           excerpt: asText(source.excerpt),
           source_type: asText(source.source_type),
+          retrieval_score:
+            typeof source.retrieval_score === "number"
+              ? source.retrieval_score
+              : 0,
+          retrieval_mode: asText(source.retrieval_mode),
         };
       })
     : [];
@@ -206,6 +212,7 @@ export default function Home() {
   const [actionMessage, setActionMessage] = useState("");
   const [documents, setDocuments] = useState<HistoryDocument[]>([]);
   const [knowledgePosts, setKnowledgePosts] = useState<KnowledgePost[]>([]);
+  const [runRecords, setRunRecords] = useState<RunRecord[]>([]);
 
   const generatesExcel = generationMode !== "word";
   const generatesWord = generationMode !== "excel";
@@ -257,6 +264,13 @@ export default function Home() {
       })
       .then((result) => {
         if (!cancelled && result) setKnowledgePosts(result.posts);
+        return requestLocal<{ runs: RunRecord[] }>(
+          token,
+          "/api/runs?limit=20",
+        ).catch(() => ({ runs: [] }));
+      })
+      .then((result) => {
+        if (!cancelled && result) setRunRecords(result.runs);
       })
       .catch(() => {
         if (!cancelled) setConnected(false);
@@ -369,6 +383,11 @@ export default function Home() {
         "/api/documents",
       );
       setDocuments(history.documents);
+      const runs = await requestLocal<{ runs: RunRecord[] }>(
+        token,
+        "/api/runs?limit=20",
+      );
+      setRunRecords(runs.runs);
     } catch {
       // 文件已经在本机保存，历史列表连接恢复后会重新加载。
     }
@@ -786,6 +805,7 @@ export default function Home() {
           {activeNav === "历史文档" && (
             <HistoryDocumentsSection
               documents={documents}
+              runs={runRecords}
               onDownload={downloadHistoryDocument}
               onGoToToday={() => setActiveNav("今日复盘")}
             />

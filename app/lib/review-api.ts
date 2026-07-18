@@ -3,6 +3,24 @@ const API_BASE = "http://127.0.0.1:8765";
 export type BranchState = {
   status: "pending" | "running" | "succeeded" | "failed" | "skipped";
   message: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+  model?: string;
+  usage?: {
+    available: boolean;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  source_count?: number;
+  source_refs?: Array<{
+    title: string;
+    source_type: string;
+    source_url: string;
+    retrieval_score: number;
+  }>;
+  error_type?: string;
 };
 
 export type Job<T = unknown> = {
