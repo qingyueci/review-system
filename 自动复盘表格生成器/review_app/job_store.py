@@ -112,6 +112,29 @@ class JobStore:
             for row in rows
         ]
 
+    def prune(self, max_records: int = 100) -> int:
+        """只清理超出上限的已结束任务，运行中的任务不会被删除。"""
+        safe_max = max(20, max_records)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT job_id, job_json
+                FROM generation_jobs
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+            removable = []
+            for row in rows[safe_max:]:
+                job = json.loads(row["job_json"])
+                if job.get("status") in {"succeeded", "failed"}:
+                    removable.append((row["job_id"],))
+            if removable:
+                connection.executemany(
+                    "DELETE FROM generation_jobs WHERE job_id = ?",
+                    removable,
+                )
+        return len(removable)
+
     def mark_interrupted(self) -> None:
         """把上次进程遗留的运行态标成中断，避免界面无限等待。"""
         for item in self.recent(limit=50):

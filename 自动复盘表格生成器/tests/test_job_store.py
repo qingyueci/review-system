@@ -25,3 +25,19 @@ def test_job_store_preserves_request_and_marks_interrupted(tmp_path) -> None:
     assert restored["branches"]["excel"]["status"] == "succeeded"
     assert restored["branches"]["word"]["status"] == "failed"
     assert store.get_request("job-1")["text"] == "首板出身"
+
+
+def test_job_store_prunes_only_old_finished_jobs(tmp_path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    store.save("running-old", {"kind": "analysis", "status": "running"})
+    for index in range(25):
+        store.save(
+            f"finished-{index}",
+            {"kind": "analysis", "status": "succeeded"},
+        )
+
+    removed = store.prune(max_records=20)
+
+    assert removed == 5
+    assert store.get("running-old") is not None
+    assert len(store.recent(limit=50)) == 21

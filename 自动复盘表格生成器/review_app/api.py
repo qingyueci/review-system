@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
-from io import BytesIO
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import secrets
 from threading import Lock, Thread
-from typing import Any, Literal
+from typing import Any
 
-from docx import Document
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
 
-from .analysis import analyze_with_rag, workbook_to_text
+from .analysis import analyze_with_rag
+from .analysis_parser import parse_analysis_sections, parse_task_table
 from .config import DATA_DIR, PROJECT_DIR
 from .crawler import TgbCrawler
 from .docx_export import generate_analysis_docx
@@ -26,6 +25,8 @@ from .job_store import JobStore
 from .knowledge import KnowledgeStore, sync_top_year
 from .llm import parse_with_kimi
 from .preprocessing import preprocess_text
+from .review_input import extract_review_text
+from .schemas import AnalyzeRequest, FetchReviewRequest, RetryGenerationRequest
 from .validation import validate_data
 
 
@@ -33,10 +34,8 @@ SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
     "https://fupan-cockpit.junxicai1.chatgpt.site",
 ).rstrip("/")
-SERVICE_VERSION = "1.2.0"
+SERVICE_VERSION = "1.3.0"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
-MAX_FILE_BYTES = 15 * 1024 * 1024
-MAX_TEXT_CHARS = 120_000
 DOCUMENT_DIR = PROJECT_DIR / "output"
 
 
@@ -59,36 +58,27 @@ JOB_STORE = JobStore()
 JOB_STORE.mark_interrupted()
 
 
-class AnalyzeRequest(BaseModel):
-    filename: str = Field(default="每日复盘.txt", max_length=240)
-    text: str = Field(default="", max_length=MAX_TEXT_CHARS)
-    content_base64: str = ""
-    review_date: str = ""
-    api_key: str = Field(default="", max_length=300)
-    generate_excel: bool = True
-    generate_word: bool = True
-    input_is_excel: bool = False
-
-
-class RetryGenerationRequest(BaseModel):
-    branch: Literal["excel", "word"]
-    api_key: str = Field(default="", max_length=300)
-
-
-class FetchReviewRequest(BaseModel):
-    review_date: str
-
-
 def _register_job(
     job_id: str,
     job: dict[str, Any],
     request_payload: dict[str, Any] | None = None,
-) -> None:
+) -> str:
     with jobs_lock:
+        fingerprint = job.get("request_fingerprint")
+        if fingerprint:
+            for existing_id, existing in jobs.items():
+                if (
+                    existing.get("kind") == "analysis"
+                    and existing.get("status") in {"pending", "running"}
+                    and existing.get("request_fingerprint") == fingerprint
+                ):
+                    return existing_id
         jobs[job_id] = dict(job)
         snapshot = dict(jobs[job_id])
     if job.get("kind") == "analysis":
         JOB_STORE.save(job_id, snapshot, request_payload)
+        JOB_STORE.prune()
+    return job_id
 
 
 def _update_job(job_id: str, **updates: Any) -> dict[str, Any]:
@@ -137,6 +127,24 @@ def _persistable_request(payload: AnalyzeRequest) -> dict[str, Any]:
     return payload.model_dump(exclude={"api_key", "content_base64"})
 
 
+def _analysis_fingerprint(payload: AnalyzeRequest) -> str:
+    """对会影响模型输出的输入生成摘要，不保存密钥和原始文件。"""
+    value = {
+        "review_date": payload.review_date,
+        "text": payload.text,
+        "generate_excel": payload.generate_excel,
+        "generate_word": payload.generate_word,
+        "input_is_excel": payload.input_is_excel,
+    }
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 app = FastAPI(title="复盘驾驶舱本地服务", version=SERVICE_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -167,101 +175,6 @@ async def protect_local_api(request: Request, call_next):
 def _verify_token(value: str | None) -> None:
     if not value or not secrets.compare_digest(value, SERVICE_TOKEN):
         raise HTTPException(status_code=401, detail="请从“启动复盘驾驶舱”打开站点")
-
-
-def _decode_text(content: bytes) -> str:
-    for encoding in ("utf-8-sig", "gb18030"):
-        try:
-            return content.decode(encoding).strip()
-        except UnicodeDecodeError:
-            continue
-    raise ValueError("文本编码无法识别，请保存为 UTF-8 后重试")
-
-
-def _docx_to_text(content: bytes) -> str:
-    document = Document(BytesIO(content))
-    lines = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-    for table in document.tables:
-        for row in table.rows:
-            values = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if values:
-                lines.append(" | ".join(values))
-    text = "\n".join(lines).strip()
-    if not text:
-        raise ValueError("Word 文档中没有可分析的文字")
-    return text
-
-
-def extract_review_text(payload: AnalyzeRequest) -> str:
-    if payload.text.strip():
-        return payload.text.strip()
-    if not payload.content_base64:
-        raise ValueError("请先导入复盘文件或自爬取当日复盘")
-    try:
-        content = base64.b64decode(payload.content_base64, validate=True)
-    except ValueError as exc:
-        raise ValueError("上传文件内容损坏，请重新选择") from exc
-    if len(content) > MAX_FILE_BYTES:
-        raise ValueError("复盘文件不能超过 15MB")
-    suffix = Path(payload.filename).suffix.lower()
-    if suffix in {".txt", ".md"}:
-        return _decode_text(content)
-    if suffix == ".docx":
-        return _docx_to_text(content)
-    if suffix == ".xlsx":
-        return workbook_to_text(content)
-    raise ValueError("仅支持 DOCX、XLSX、TXT 和 Markdown 复盘文件")
-
-
-def parse_analysis_sections(analysis: str) -> dict[str, str]:
-    """按 Markdown 标题拆分，供驾驶舱按模块展示。"""
-    sections: dict[str, list[str]] = {}
-    current = "分析摘要"
-    for raw_line in analysis.splitlines():
-        heading = re.match(r"^#{1,3}\s+(.+?)\s*$", raw_line.strip())
-        if heading:
-            current = heading.group(1).strip()
-            sections.setdefault(current, [])
-            continue
-        sections.setdefault(current, []).append(raw_line)
-    return {
-        title: "\n".join(lines).strip()
-        for title, lines in sections.items()
-        if "\n".join(lines).strip()
-    }
-
-
-def parse_task_table(analysis: str) -> list[dict]:
-    """提取模型输出的标准个股任务 Markdown 表格。"""
-    lines = [line.strip() for line in analysis.splitlines() if line.strip()]
-    required = ["个股", "首板出身", "原始任务", "当前地位", "协同/压制对象", "完成信号", "失败信号"]
-    for index, line in enumerate(lines):
-        if not (line.startswith("|") and all(column in line for column in required)):
-            continue
-        headers = [cell.strip() for cell in line.strip("|").split("|")]
-        if index + 1 >= len(lines) or not re.match(r"^\|?[\s:|-]+\|", lines[index + 1]):
-            continue
-        tasks: list[dict] = []
-        for row in lines[index + 2:]:
-            if not row.startswith("|"):
-                break
-            values = [cell.strip() for cell in row.strip("|").split("|")]
-            if len(values) != len(headers):
-                continue
-            item = dict(zip(headers, values))
-            if not item.get("个股"):
-                continue
-            tasks.append({
-                "stock": item.get("个股", ""),
-                "origin": item.get("首板出身", ""),
-                "original_task": item.get("原始任务", ""),
-                "current_position": item.get("当前地位", ""),
-                "relations": item.get("协同/压制对象", ""),
-                "success_signal": item.get("完成信号", ""),
-                "failure_signal": item.get("失败信号", ""),
-            })
-        return tasks[:8]
-    return []
 
 
 def _public_source(source: dict) -> dict:
@@ -729,6 +642,7 @@ def _start_analysis_job(
         "current": 0,
         "total": 1 + len(selected),
         "retry_of": retry_of,
+        "request_fingerprint": _analysis_fingerprint(payload),
         "branches": {
             "excel": {
                 "status": "pending" if payload.generate_excel else "skipped",
@@ -748,13 +662,19 @@ def _start_analysis_job(
             },
         },
     }
-    _register_job(
+    registered_id = _register_job(
         job_id,
         job,
         request_payload=_persistable_request(payload),
     )
+    if registered_id != job_id:
+        return {
+            "job_id": registered_id,
+            "status": "running",
+            "reused": True,
+        }
     Thread(target=_run_analysis, args=(job_id, payload), daemon=True).start()
-    return {"job_id": job_id, "status": "pending"}
+    return {"job_id": job_id, "status": "pending", "reused": False}
 
 
 @app.post("/api/jobs/{job_id}/retry")

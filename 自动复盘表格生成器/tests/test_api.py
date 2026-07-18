@@ -1,4 +1,5 @@
 import base64
+from threading import Event
 import time
 
 from fastapi.testclient import TestClient
@@ -91,7 +92,7 @@ def test_status_requires_token() -> None:
         headers={"X-Review-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 200
-    assert response.json()["service_version"] == "1.2.0"
+    assert response.json()["service_version"] == "1.3.0"
     assert response.json()["stats"]["chunks"] > 0
 
 
@@ -192,6 +193,34 @@ def test_async_analysis_returns_job_and_result(monkeypatch, tmp_path) -> None:
     assert job["result"]["tasks"][0]["stock"] == "甲股"
     assert job["result"]["excel_filename"].endswith(".xlsx")
     assert job["current"] == job["total"] == 3
+
+
+def test_duplicate_running_analysis_reuses_same_job(monkeypatch) -> None:
+    import review_app.api as api_module
+
+    release = Event()
+
+    def hold_job(*_args, **_kwargs) -> None:
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(api_module, "_run_analysis", hold_job)
+    client = TestClient(app, base_url="http://127.0.0.1")
+    headers = {"X-Review-Token": SERVICE_TOKEN}
+    request = {
+        "filename": "复盘.txt",
+        "text": "首板出身与板块布局",
+        "review_date": "2026-07-18",
+        "api_key": "test-key",
+    }
+
+    first = client.post("/api/analyze-async", headers=headers, json=request)
+    second = client.post("/api/analyze-async", headers=headers, json=request)
+    release.set()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert second.json()["reused"] is True
 
 
 def test_parallel_generation_keeps_excel_when_word_fails(monkeypatch, tmp_path) -> None:
