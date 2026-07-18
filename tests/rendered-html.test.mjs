@@ -14,8 +14,10 @@ test("页面包含产品核心信息", () => {
   assert.match(html, /布局分析/);
   assert.match(html, /知识库/);
   assert.match(html, /历史文档/);
-  assert.match(html, /开始 RAG 布局分析/);
   assert.match(html, /自爬取当日复盘/);
+  assert.match(html, /生成 Excel \+ Word/);
+  assert.match(html, /Excel 完整整理/);
+  assert.match(html, /Word 核心分析/);
 });
 
 test("页面不再包含脚手架预览", () => {
@@ -27,6 +29,7 @@ test("耗时操作使用后台任务和进度轮询", () => {
   assert.match(html, /\/api\/fetch-review-async/);
   assert.match(html, /\/api\/analyze-async/);
   assert.match(html, /waitForJob/);
+  assert.match(html, /review-active-generation/);
   assert.doesNotMatch(html, /180_000/);
 });
 

@@ -41,6 +41,15 @@ type AnalysisResult = {
   sources: Source[];
   document_base64: string;
   document_filename: string;
+  excel_base64: string;
+  excel_filename: string;
+  branches: Record<"excel" | "word", BranchState>;
+  warnings: string[];
+};
+
+type BranchState = {
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  message: string;
 };
 
 type AnalysisTask = {
@@ -58,6 +67,7 @@ type Job<T = unknown> = {
   message: string;
   current: number;
   total: number;
+  branches?: Record<"excel" | "word", BranchState>;
   stats?: Stats;
   result?: T;
 };
@@ -73,6 +83,7 @@ type HistoryDocument = {
   filename: string;
   modified_at: string;
   size: number;
+  kind: "word" | "excel";
 };
 
 type KnowledgePost = {
@@ -172,7 +183,10 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
   );
   const tasks = Array.isArray(raw.tasks)
     ? raw.tasks.map((value) => {
-        const task = value as Partial<AnalysisTask>;
+        const task =
+          value && typeof value === "object"
+            ? (value as Partial<AnalysisTask>)
+            : {};
         return {
           stock: asText(task.stock) || "未命名个股",
           origin: asText(task.origin) || "资料不足",
@@ -186,7 +200,10 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
     : [];
   const sources = Array.isArray(raw.sources)
     ? raw.sources.map((value) => {
-        const source = value as Partial<Source>;
+        const source =
+          value && typeof value === "object"
+            ? (value as Partial<Source>)
+            : {};
         return {
           level: asText(source.level) || "公开资料",
           title: asText(source.title) || "未命名资料",
@@ -197,13 +214,43 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
         };
       })
     : [];
+  const rawBranches =
+    raw.branches && typeof raw.branches === "object" ? raw.branches : {};
+  const normalizeBranch = (
+    name: "excel" | "word",
+    ready: boolean,
+  ): BranchState => {
+    const branch = rawBranches[name] as Partial<BranchState> | undefined;
+    const allowed = ["pending", "running", "succeeded", "failed", "skipped"];
+    return {
+      status: allowed.includes(asText(branch?.status))
+        ? (branch?.status as BranchState["status"])
+        : ready
+          ? "succeeded"
+          : "skipped",
+      message:
+        asText(branch?.message) ||
+        (ready ? "已生成并保存" : "本次没有生成"),
+    };
+  };
+  const documentFilename = asText(raw.document_filename);
+  const excelFilename = asText(raw.excel_filename);
   return {
     analysis: asText(raw.analysis),
     sections,
     tasks,
     sources,
     document_base64: asText(raw.document_base64),
-    document_filename: asText(raw.document_filename),
+    document_filename: documentFilename,
+    excel_base64: asText(raw.excel_base64),
+    excel_filename: excelFilename,
+    branches: {
+      excel: normalizeBranch("excel", Boolean(excelFilename)),
+      word: normalizeBranch("word", Boolean(documentFilename)),
+    },
+    warnings: Array.isArray(raw.warnings)
+      ? raw.warnings.map(asText).filter(Boolean)
+      : [],
   };
 }
 
@@ -305,12 +352,17 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
+  const [generationJob, setGenerationJob] = useState<Job<AnalysisResult> | null>(null);
   const [syncJob, setSyncJob] = useState<Job | null>(null);
   const [notice, setNotice] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [documents, setDocuments] = useState<HistoryDocument[]>([]);
   const [knowledgePosts, setKnowledgePosts] = useState<KnowledgePost[]>([]);
 
+  const hasWordAnalysis = Boolean(analysis?.analysis.trim());
+  const hasGeneratedFiles = Boolean(
+    analysis?.document_filename || analysis?.excel_filename,
+  );
   const evidence = analysis?.sources ?? [];
   const sections = analysis?.sections ?? {};
   const coreJudgement = sections["今日核心判断"];
@@ -369,9 +421,77 @@ export default function Home() {
     };
   }, [token]);
 
+  useEffect(() => {
+    if (!connected || !token) return;
+    const jobId = window.sessionStorage.getItem("review-active-generation");
+    if (!jobId) return;
+    let cancelled = false;
+    setIsAnalyzing(true);
+    setActionMessage("检测到未结束的生成任务，正在恢复进度……");
+    waitForJob<AnalysisResult>(token, jobId, (job) => {
+      if (!cancelled) {
+        setGenerationJob(job);
+        setActionMessage(
+          `${job.message}${job.total > 1 ? `（${job.current}/${job.total}）` : ""}`,
+        );
+      }
+    })
+      .then(async (job) => {
+        if (cancelled || !job.result) return;
+        await applyGenerationResult(job.result, true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const message =
+          error instanceof Error ? error.message : "未能恢复上次生成任务";
+        setActionMessage(message);
+        showNotice(message);
+      })
+      .finally(() => {
+        window.sessionStorage.removeItem("review-active-generation");
+        if (!cancelled) setIsAnalyzing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, token]);
+
   function showNotice(message: string) {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 4200);
+  }
+
+  async function applyGenerationResult(
+    value: AnalysisResult,
+    recovered = false,
+  ) {
+    const result = normalizeAnalysisResult(value);
+    setAnalysis(result);
+    try {
+      const history = await requestLocal<{ documents: HistoryDocument[] }>(
+        token,
+        "/api/documents",
+      );
+      setDocuments(history.documents);
+    } catch {
+      // 文件已经在本机保存，历史列表连接恢复后会重新加载。
+    }
+    if (result.analysis) {
+      setActiveNav("布局分析");
+    } else {
+      setActiveNav("今日复盘");
+    }
+    const completed = [
+      result.excel_filename ? "Excel" : "",
+      result.document_filename ? "Word" : "",
+    ].filter(Boolean);
+    const prefix = recovered ? "已恢复上次任务" : "本次生成完成";
+    const summary = completed.length
+      ? `${prefix}：${completed.join(" + ")} 已保存。`
+      : `${prefix}，没有新增文件。`;
+    const warning = result.warnings[0];
+    setActionMessage(warning ? `${summary} ${warning}` : "");
+    showNotice(warning ? `${summary} 部分任务未完成。` : summary);
   }
 
   function requireConnection() {
@@ -391,7 +511,9 @@ export default function Home() {
       setCrawledText("");
       setCrawledSource("");
       setActionMessage("");
-      showNotice(`已选择「${file.name}」，点击“开始分析”即可。`);
+      showNotice(
+        `已选择「${file.name}」，点击“生成 Excel + Word”即可。`,
+      );
     }
   }
 
@@ -451,7 +573,8 @@ export default function Home() {
       return;
     }
     setIsAnalyzing(true);
-    setActionMessage("正在启动 RAG 布局分析任务……");
+    setGenerationJob(null);
+    setActionMessage("正在启动 Excel 整理与 Word 布局分析……");
     try {
       const contentBase64 = reviewFile ? await fileToBase64(reviewFile) : "";
       const started = await requestLocal<{ job_id: string; status: string }>(
@@ -465,35 +588,36 @@ export default function Home() {
             text: crawledText,
             review_date: reviewDate,
             api_key: apiKey,
+            generate_excel: true,
+            generate_word: true,
           }),
         },
+      );
+      window.sessionStorage.setItem(
+        "review-active-generation",
+        started.job_id,
       );
       const completed = await waitForJob<AnalysisResult>(
         token,
         started.job_id,
-        (job) =>
+        (job) => {
+          setGenerationJob(job);
           setActionMessage(
             `${job.message}${job.total > 1 ? `（${job.current}/${job.total}）` : ""}`,
-          ),
+          );
+        },
       );
       if (!completed.result) {
-        throw new Error("分析完成，但没有返回结果");
+        throw new Error("任务结束，但没有返回生成结果");
       }
-      const result = normalizeAnalysisResult(completed.result);
-      setAnalysis(result);
-      setActiveNav("布局分析");
-      const history = await requestLocal<{ documents: HistoryDocument[] }>(
-        token,
-        "/api/documents",
-      );
-      setDocuments(history.documents);
-      setActionMessage("");
-      showNotice("RAG 分析完成，已同步生成 Word 文档。");
+      setGenerationJob(completed);
+      await applyGenerationResult(completed.result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "分析失败";
       setActionMessage(message);
       showNotice(message);
     } finally {
+      window.sessionStorage.removeItem("review-active-generation");
       setIsAnalyzing(false);
     }
   }
@@ -529,26 +653,19 @@ export default function Home() {
   }
 
   function downloadDocument() {
-    if (!analysis) {
-      showNotice("请先完成一次真实分析。");
+    if (!analysis?.document_filename) {
+      showNotice("本次还没有生成 Word。");
       return;
     }
-    if (!analysis.document_base64) {
-      showNotice("当前页面没有缓存 Word，请到“历史文档”中下载。");
-      setActiveNav("历史文档");
+    void downloadHistoryDocument(analysis.document_filename);
+  }
+
+  function downloadExcel() {
+    if (!analysis?.excel_filename) {
+      showNotice("本次还没有生成 Excel。");
       return;
     }
-    const binary = window.atob(analysis.document_base64);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    const blob = new Blob([bytes], {
-      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = analysis.document_filename;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    void downloadHistoryDocument(analysis.excel_filename);
   }
 
   async function downloadHistoryDocument(filename: string) {
@@ -560,7 +677,7 @@ export default function Home() {
       );
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || "历史文档下载失败");
+        throw new Error(payload.detail || "生成文件下载失败");
       }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -570,7 +687,7 @@ export default function Home() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "历史文档下载失败");
+      showNotice(error instanceof Error ? error.message : "生成文件下载失败");
     }
   }
 
@@ -596,10 +713,10 @@ export default function Home() {
             </div>
           </div>
           <button className="btn btn-secondary" disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>
-            {syncJob?.status === "running" ? `清洗中 ${syncJob.current}/${syncJob.total}` : "自爬取并清洗"}
+            {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "更新知识库"}
           </button>
           <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
-            {isAnalyzing ? "正在检索分析…" : "开始分析"}
+            {isAnalyzing ? "正在并行生成…" : "生成 Excel + Word"}
           </button>
         </div>
       </header>
@@ -653,7 +770,7 @@ export default function Home() {
               <section className="intake-card">
                 <div className="intake-heading">
                   <span className="section-number">01</span>
-                  <div><span className="eyebrow">分析输入</span><h3>选择文件，或直接自爬取当日复盘</h3></div>
+                  <div><span className="eyebrow">生成输入</span><h3>选择文件，或直接自爬取当日复盘</h3></div>
                 </div>
                 <div className="input-status-row">
                   <div>
@@ -671,18 +788,73 @@ export default function Home() {
                 </div>
                 {actionMessage && <div className={`action-message ${isAnalyzing ? "working" : ""}`}>{actionMessage}</div>}
                 <div className="pipeline-row">
-                  <div><span>1</span><strong>载入复盘</strong><small>文件或公开原帖</small></div>
+                  <div><span>1</span><strong>载入并清洗</strong><small>文件或公开原帖</small></div>
                   <i>→</i>
-                  <div><span>2</span><strong>检索 RAG</strong><small>本人回复优先</small></div>
+                  <div><span>2</span><strong>并行启动</strong><small>两条链路互不拖累</small></div>
                   <i>→</i>
-                  <div><span>3</span><strong>布局分析</strong><small>任务与地位变化</small></div>
+                  <div><span>X</span><strong>Excel 完整整理</strong><small>保留全部复盘信息</small></div>
                   <i>→</i>
-                  <div><span>4</span><strong>生成 Word</strong><small>自动进入历史</small></div>
+                  <div><span>W</span><strong>Word 核心分析</strong><small>只写有地位的个股</small></div>
                 </div>
+                {(generationJob?.branches || analysis?.branches) && (
+                  <div className="branch-status-grid">
+                    {(["excel", "word"] as const).map((name) => {
+                      const branch =
+                        generationJob?.branches?.[name] ??
+                        analysis?.branches[name];
+                      if (!branch) return null;
+                      return (
+                        <div
+                          key={name}
+                          className={`branch-status ${branch.status}`}
+                        >
+                          <span>{name === "excel" ? "X" : "W"}</span>
+                          <div>
+                            <strong>
+                              {name === "excel"
+                                ? "Excel 完整整理"
+                                : "Word 布局分析"}
+                            </strong>
+                            <small>{branch.message}</small>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 <button className="primary-run-button" disabled={isAnalyzing} onClick={handleAnalyze}>
-                  <span>{isAnalyzing ? "正在检索并生成分析…" : "开始 RAG 布局分析"}</span>
-                  <small>{reviewFile || crawledText ? "输入已就绪" : "需要先载入每日复盘"}</small>
+                  <span>{isAnalyzing ? "Excel 与 Word 正在并行生成…" : "生成 Excel + Word"}</span>
+                  <small>
+                    {reviewFile?.name.toLowerCase().endsWith(".xlsx")
+                      ? "输入已是 Excel，本次只新增 Word 分析"
+                      : reviewFile || crawledText
+                        ? "一次点击，分别保存两个结果"
+                        : "需要先载入每日复盘"}
+                  </small>
                 </button>
+                {hasGeneratedFiles && analysis && (
+                  <div className="generated-files">
+                    <div>
+                      <span className="eyebrow">本次输出</span>
+                      <strong>成功结果已独立保存</strong>
+                      <small>其中一条链路失败时，另一条结果不会丢失。</small>
+                    </div>
+                    <div className="generated-file-actions">
+                      <button
+                        disabled={!analysis.excel_filename}
+                        onClick={downloadExcel}
+                      >
+                        下载 Excel
+                      </button>
+                      <button
+                        disabled={!analysis.document_filename}
+                        onClick={downloadDocument}
+                      >
+                        下载 Word
+                      </button>
+                    </div>
+                  </div>
+                )}
               </section>
               <section className="today-note-grid">
                 <article><span className="eyebrow">分析主线</span><h3>首板出身决定原始任务</h3><p>先确认从哪里发酵、为谁开路，再判断个股是否完成任务。</p></article>
@@ -693,15 +865,15 @@ export default function Home() {
 
           {activeNav === "布局分析" && (
             <>
-              {!analysis && (
+              {!hasWordAnalysis && (
                 <div className="page-empty">
                   <span className="empty-symbol">未</span>
                   <h3>还没有真实分析结果</h3>
-                  <p>导航可以正常进入，但需要先在“今日复盘”载入资料并运行分析。</p>
+                  <p>Excel 可能已经生成；Word 布局分析需要模型额度可用后才能显示。</p>
                   <button onClick={() => setActiveNav("今日复盘")}>前往今日复盘</button>
                 </div>
               )}
-              {analysis && (
+              {analysis && hasWordAnalysis && (
                 <>
                   <section className="judgement-card">
                     <div className="judgement-topline">
@@ -779,7 +951,7 @@ export default function Home() {
             <>
               <section className="knowledge-hero">
                 <div><span className="eyebrow">本机 RAG 状态</span><h3>{stats.chunks.toLocaleString()} 条证据已建立检索索引</h3><p>更新会自动完成发现、抓取、去重、清洗、分段和索引重建。</p></div>
-                <button disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>{syncJob?.status === "running" ? "正在更新…" : "自爬取并清洗"}</button>
+                <button disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>{syncJob?.status === "running" ? "正在更新…" : "更新知识库（爬取并清洗）"}</button>
               </section>
               {syncJob && (syncJob.status === "pending" || syncJob.status === "running") && (
                 <div className="sync-progress"><div style={{ width: `${Math.round((syncJob.current / Math.max(syncJob.total, 1)) * 100)}%` }} /><span>{syncJob.message}</span></div>
@@ -826,19 +998,19 @@ export default function Home() {
 
           {activeNav === "历史文档" && (
             <section className="history-panel">
-              <div className="history-heading"><div><span className="eyebrow">本机保存</span><h3>已生成的 Word 复盘</h3></div><span>{documents.length} 份</span></div>
+              <div className="history-heading"><div><span className="eyebrow">本机保存</span><h3>已生成的 Excel 与 Word</h3></div><span>{documents.length} 份</span></div>
               {documents.length ? (
                 <div className="document-list">
                   {documents.map((item) => (
                     <article key={item.filename}>
-                      <div className="doc-icon">W</div>
+                      <div className={`doc-icon ${item.kind}`}>{item.kind === "excel" ? "X" : "W"}</div>
                       <div><strong>{item.filename}</strong><small>{item.modified_at.replace("T", " ")} · {Math.max(1, Math.round(item.size / 1024))} KB</small></div>
                       <button onClick={() => downloadHistoryDocument(item.filename)}>下载</button>
                     </article>
                   ))}
                 </div>
               ) : (
-                <div className="page-empty compact"><h3>还没有历史文档</h3><p>每次真实分析完成后，Word 会自动保存到本机并出现在这里。</p><button onClick={() => setActiveNav("今日复盘")}>开始第一次分析</button></div>
+                <div className="page-empty compact"><h3>还没有生成文件</h3><p>每次运行后，成功生成的 Excel 和 Word 都会独立保存到这里。</p><button onClick={() => setActiveNav("今日复盘")}>开始第一次生成</button></div>
               )}
             </section>
           )}
@@ -848,7 +1020,7 @@ export default function Home() {
           {activeNav === "布局分析" && (
             <>
               <div className="evidence-header"><span className="eyebrow">RAG 证据链</span><span className="evidence-count">{evidence.length} 条</span></div>
-              <h2>{analysis ? "本次真实引用" : "等待检索"}</h2>
+              <h2>{hasWordAnalysis ? "本次真实引用" : "等待检索"}</h2>
               <p className="evidence-intro">优先级：本人回复 → 历史原帖 → 人工整理体系 → 社区精选观点。</p>
               <div className="evidence-list">
                 {evidence.length ? evidence.map((item, index) => (
@@ -858,7 +1030,7 @@ export default function Home() {
                   </article>
                 )) : <div className="empty-evidence"><strong>这里不会放虚构引用</strong><p>完成一次真实分析后才显示检索来源。</p></div>}
               </div>
-              <button className="export-button" disabled={!analysis} onClick={downloadDocument}><span>下载本次 Word</span><small>{analysis ? "已同时保存到历史" : "完成分析后启用"}</small></button>
+              <button className="export-button" disabled={!analysis?.document_filename} onClick={downloadDocument}><span>下载本次 Word</span><small>{analysis?.document_filename ? "已同时保存到历史" : "完成 Word 分析后启用"}</small></button>
             </>
           )}
           {activeNav === "今日复盘" && (
@@ -870,7 +1042,7 @@ export default function Home() {
                 <div className={reviewFile || crawledText ? "done" : ""}><span>{reviewFile || crawledText ? "✓" : "2"}</span><strong>每日复盘</strong><small>{reviewFile || crawledText ? "已载入" : "文件或自爬取"}</small></div>
                 <div className={apiKeyConfigured || Boolean(apiKey.trim()) ? "done" : ""}><span>{apiKeyConfigured || apiKey.trim() ? "✓" : "3"}</span><strong>模型密钥</strong><small>{apiKeyConfigured || apiKey.trim() ? "已就绪" : "临时填写即可"}</small></div>
               </div>
-              <div className="evidence-rule"><strong>准备完成后</strong><ol><li>检索历史原帖与回复</li><li>生成布局任务分析</li><li>保存 Word 到历史文档</li></ol></div>
+              <div className="evidence-rule"><strong>准备完成后</strong><ol><li>清洗同一份原始复盘</li><li>并行生成完整 Excel</li><li>只分析有地位个股并保存 Word</li></ol></div>
             </>
           )}
           {activeNav === "知识库" && (
@@ -885,8 +1057,8 @@ export default function Home() {
             <>
               <div className="evidence-header"><span className="eyebrow">保存位置</span></div>
               <h2>只保存在本机</h2>
-              <p className="evidence-intro">Word 文件不会上传到站点。历史列表来自本机生成器的 output 目录。</p>
-              <div className="evidence-rule"><strong>每份文档包含</strong><ol><li>核心判断与布局关系</li><li>个股任务与地位变化</li><li>明日确认和失效条件</li><li>可核对的历史资料链接</li></ol></div>
+              <p className="evidence-intro">Excel 和 Word 都不会上传到站点。历史列表来自本机生成器的 output 目录。</p>
+              <div className="evidence-rule"><strong>两类结果分工</strong><ol><li>Excel：完整整理，不新增观点</li><li>Word：只分析有任务和地位的核心个股</li><li>任一失败，成功结果仍会保留</li></ol></div>
             </>
           )}
         </aside>
