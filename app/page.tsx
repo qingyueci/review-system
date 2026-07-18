@@ -148,11 +148,63 @@ function todayText() {
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
-function cleanMarkdown(value: string) {
-  return value
+function asText(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function cleanMarkdown(value: unknown) {
+  return asText(value)
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/^[-*]\s+/gm, "• ")
     .trim();
+}
+
+function normalizeAnalysisResult(value: unknown): AnalysisResult {
+  const raw =
+    value && typeof value === "object"
+      ? (value as Partial<AnalysisResult>)
+      : {};
+  const sections = Object.fromEntries(
+    Object.entries(raw.sections ?? {}).map(([key, content]) => [
+      key,
+      asText(content),
+    ]),
+  );
+  const tasks = Array.isArray(raw.tasks)
+    ? raw.tasks.map((value) => {
+        const task = value as Partial<AnalysisTask>;
+        return {
+          stock: asText(task.stock) || "未命名个股",
+          origin: asText(task.origin) || "资料不足",
+          original_task: asText(task.original_task) || "资料不足",
+          current_position: asText(task.current_position) || "资料不足",
+          relations: asText(task.relations) || "资料不足",
+          success_signal: asText(task.success_signal) || "资料不足",
+          failure_signal: asText(task.failure_signal) || "资料不足",
+        };
+      })
+    : [];
+  const sources = Array.isArray(raw.sources)
+    ? raw.sources.map((value) => {
+        const source = value as Partial<Source>;
+        return {
+          level: asText(source.level) || "公开资料",
+          title: asText(source.title) || "未命名资料",
+          published_at: asText(source.published_at),
+          source_url: asText(source.source_url),
+          excerpt: asText(source.excerpt),
+          source_type: asText(source.source_type),
+        };
+      })
+    : [];
+  return {
+    analysis: asText(raw.analysis),
+    sections,
+    tasks,
+    sources,
+    document_base64: asText(raw.document_base64),
+    document_filename: asText(raw.document_filename),
+  };
 }
 
 async function requestLocal<T>(
@@ -270,7 +322,7 @@ export default function Home() {
   const tomorrowText = sections["明日竞价确认条件"];
   const failureText = sections["判断失效条件"];
   const displayTasks =
-    analysis?.tasks.length ? analysis.tasks.slice(0, 4) : null;
+    analysis?.tasks?.length ? analysis.tasks.slice(0, 4) : null;
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -427,7 +479,7 @@ export default function Home() {
       if (!completed.result) {
         throw new Error("分析完成，但没有返回结果");
       }
-      const result = completed.result;
+      const result = normalizeAnalysisResult(completed.result);
       setAnalysis(result);
       setActiveNav("布局分析");
       const history = await requestLocal<{ documents: HistoryDocument[] }>(
@@ -479,6 +531,11 @@ export default function Home() {
   function downloadDocument() {
     if (!analysis) {
       showNotice("请先完成一次真实分析。");
+      return;
+    }
+    if (!analysis.document_base64) {
+      showNotice("当前页面没有缓存 Word，请到“历史文档”中下载。");
+      setActiveNav("历史文档");
       return;
     }
     const binary = window.atob(analysis.document_base64);
@@ -692,7 +749,7 @@ export default function Home() {
                   </section>
                   <section className="panel matrix-panel">
                     <div className="panel-heading"><div><span className="section-number">03</span><div><span className="eyebrow">个股任务</span><h3>模型提取的任务表</h3></div></div></div>
-                    {analysis.tasks.length ? (
+                    {analysis.tasks?.length ? (
                       <div className="task-table-wrap">
                         <table className="task-table analysis-task-table">
                           <thead><tr><th>个股</th><th>首板出身</th><th>原始任务</th><th>当前地位</th><th>协同 / 压制</th><th>完成信号</th><th>失败信号</th></tr></thead>

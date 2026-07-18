@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const html = await readFile("app/page.tsx", "utf8");
+const errorPage = await readFile("app/error.tsx", "utf8");
+const globalErrorPage = await readFile("app/global-error.tsx", "utf8");
 
 test("页面包含产品核心信息", () => {
   assert.match(html, /复盘驾驶舱/);
@@ -26,4 +28,10 @@ test("耗时操作使用后台任务和进度轮询", () => {
   assert.match(html, /\/api\/analyze-async/);
   assert.match(html, /waitForJob/);
   assert.doesNotMatch(html, /180_000/);
+});
+
+test("分析结果异常时不会直接白屏", () => {
+  assert.match(html, /normalizeAnalysisResult/);
+  assert.match(errorPage, /重新加载复盘驾驶舱/);
+  assert.match(globalErrorPage, /分析任务和已经生成的 Word 不会丢失/);
 });

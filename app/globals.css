@@ -21,6 +21,56 @@ body {
   color: var(--ink);
   font-family: var(--font-sans), "Microsoft YaHei", "PingFang SC", sans-serif;
 }
+
+.recovery-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--paper);
+}
+
+.recovery-card {
+  width: min(580px, 100%);
+  padding: 42px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--white);
+  box-shadow: 0 18px 50px rgba(31, 40, 36, 0.09);
+}
+
+.recovery-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 24px;
+  border-radius: 12px;
+  background: var(--red);
+  color: white;
+  font-weight: 800;
+}
+
+.recovery-card h1 {
+  margin: 8px 0 12px;
+  font-size: clamp(24px, 4vw, 32px);
+}
+
+.recovery-card p:not(.eyebrow) {
+  margin: 0 0 26px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.recovery-card button {
+  border: 0;
+  border-radius: 10px;
+  padding: 13px 20px;
+  background: var(--red);
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
 button, input { font: inherit; }
 button { color: inherit; }
 .app-shell { min-height: 100vh; }
