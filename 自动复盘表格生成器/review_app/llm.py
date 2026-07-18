@@ -5,6 +5,7 @@ from typing import Any
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from .config import API_BASE_URL, API_MAX_RETRIES, API_TIMEOUT_SECONDS, MODEL_NAME
+from .model_metrics import capture_model_metrics
 
 SYSTEM_PROMPT = """你是专业的 A 股短线复盘结构化助手。只依据原文提取信息，不得补充、猜测或合并不同板块。输出一个 JSON 对象，禁止 Markdown。
 JSON 字段：
@@ -29,7 +30,12 @@ def _extract_json(text: str) -> dict[str, Any]:
     return value
 
 
-def parse_with_kimi(api_key: str, text: str) -> dict[str, Any]:
+def parse_with_kimi(
+    api_key: str,
+    text: str,
+    *,
+    metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not api_key.strip():
         raise ValueError("请填写 Kimi Code API Key，或设置 KIMI_API_KEY 环境变量")
     client = OpenAI(
@@ -67,4 +73,5 @@ def parse_with_kimi(api_key: str, text: str) -> dict[str, Any]:
     content = response.choices[0].message.content if response.choices else None
     if not content:
         raise RuntimeError("Kimi Code 返回了空内容")
+    capture_model_metrics(response, metrics)
     return _extract_json(content)

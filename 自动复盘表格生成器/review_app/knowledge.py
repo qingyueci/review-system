@@ -1,6 +1,7 @@
 from collections import Counter
 from datetime import datetime
 import json
+import math
 import re
 import sqlite3
 from typing import Callable
@@ -20,6 +21,20 @@ STOP_WORDS = {
     "市场", "个股", "板块", "老师", "刺大", "发财",
 }
 CRAWL_PIPELINE_VERSION = 3
+SOURCE_WEIGHTS = {
+    "qa": 1.0,
+    "post": 0.9,
+    "manual": 0.82,
+    "community": 0.55,
+}
+CONCEPT_TERMS = {
+    "首板出身": ("首板", "出身", "发酵来源", "起点"),
+    "个股任务": ("任务", "角色", "使命", "负责"),
+    "布局关系": ("布局", "协同", "压制", "反推", "带动"),
+    "市场地位": ("地位", "辨识度", "主动性", "独立性", "身位"),
+    "竞价确认": ("竞价", "确认", "预期", "开盘"),
+    "失败条件": ("失败", "失效", "证伪", "不及预期"),
+}
 
 
 def _tokens(value: str, *, maximum: int = 80) -> list[str]:
@@ -38,6 +53,56 @@ def _tokens(value: str, *, maximum: int = 80) -> list[str]:
 
 def _index_text(value: str) -> str:
     return " ".join(_tokens(value, maximum=400))
+
+
+def _vector_features(value: str) -> Counter:
+    """构造轻量本地语义向量，不调用外部模型、不额外消耗额度。"""
+    normalized = normalize_text(value).lower()
+    features: Counter = Counter(_tokens(normalized, maximum=160))
+    for concept, aliases in CONCEPT_TERMS.items():
+        if any(alias in normalized for alias in aliases):
+            features[f"concept:{concept}"] += 3
+    return features
+
+
+def _stored_vector_features(search_text: str, value: str) -> Counter:
+    """复用入库时的分词结果，避免每次检索重新切分全部知识库。"""
+    features: Counter = Counter(search_text.split())
+    normalized = normalize_text(value).lower()
+    for concept, aliases in CONCEPT_TERMS.items():
+        if any(alias in normalized for alias in aliases):
+            features[f"concept:{concept}"] += 3
+    return features
+
+
+def _cosine(left: Counter, right: Counter) -> float:
+    if not left or not right:
+        return 0.0
+    common = set(left) & set(right)
+    numerator = sum(left[item] * right[item] for item in common)
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    return numerator / (left_norm * right_norm) if left_norm and right_norm else 0.0
+
+
+def _time_score(value: str, source_type: str) -> float:
+    if source_type == "manual":
+        return 0.85
+    try:
+        published = datetime.fromisoformat(value.replace("Z", "+00:00")).replace(
+            tzinfo=None
+        )
+    except (TypeError, ValueError):
+        return 0.45
+    age_days = max(0, (datetime.now() - published).days)
+    return max(0.2, math.exp(-age_days / 730))
+
+
+def _topic_score(query_features: Counter, content_features: Counter) -> float:
+    query_concepts = {key for key in query_features if key.startswith("concept:")}
+    if not query_concepts:
+        return 0.0
+    return len(query_concepts & set(content_features)) / len(query_concepts)
 
 
 class KnowledgeStore:
@@ -388,7 +453,7 @@ class KnowledgeStore:
         if not terms:
             return []
         match_query = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
-        rows = self.connection.execute(
+        keyword_rows = self.connection.execute(
             """
             SELECT c.*, bm25(chunks_fts) AS rank
             FROM chunks_fts
@@ -399,37 +464,107 @@ class KnowledgeStore:
             """,
             (match_query, limit * 6),
         ).fetchall()
-        # 先保证作者原文和人工体系进入上下文，再用社区观点补充。
-        source_limits = {"qa": 4, "post": 3, "manual": 3, "community": 2}
-        ordered_rows = []
-        for source_type in ("qa", "post", "manual", "community"):
-            ordered_rows.extend(
-                row for row in rows
-                if row["source_type"] == source_type
+        all_rows = [
+            dict(row)
+            for row in self.connection.execute("SELECT * FROM chunks").fetchall()
+        ]
+        query_vector = _vector_features(query)
+        vector_scores = {
+            row["id"]: _cosine(
+                query_vector,
+                _stored_vector_features(
+                    row["search_text"],
+                    f"{row['title']} {row['content']}",
+                ),
             )
+            for row in all_rows
+        }
+        vector_ids = {
+            item[0]
+            for item in sorted(
+                vector_scores.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[: limit * 6]
+            if item[1] > 0
+        }
+        keyword_values = {
+            row["id"]: -float(row["rank"])
+            for row in keyword_rows
+        }
+        keyword_min = min(keyword_values.values(), default=0.0)
+        keyword_max = max(keyword_values.values(), default=0.0)
 
+        candidates = {
+            row["id"]: row
+            for row in all_rows
+            if row["id"] in vector_ids or row["id"] in keyword_values
+        }
+        scored_rows = []
+        for row in candidates.values():
+            raw_keyword = keyword_values.get(row["id"], keyword_min)
+            keyword_score = (
+                (raw_keyword - keyword_min) / (keyword_max - keyword_min)
+                if keyword_max > keyword_min
+                else (1.0 if row["id"] in keyword_values else 0.0)
+            )
+            content_vector = _stored_vector_features(
+                row["search_text"],
+                f"{row['title']} {row['content']}",
+            )
+            vector_score = vector_scores.get(row["id"], 0.0)
+            source_weight = SOURCE_WEIGHTS.get(row["source_type"], 0.5)
+            time_score = _time_score(row["published_at"], row["source_type"])
+            topic_score = _topic_score(query_vector, content_vector)
+            final_score = (
+                keyword_score * 0.30
+                + vector_score * 0.30
+                + source_weight * 0.22
+                + topic_score * 0.11
+                + time_score * 0.07
+            )
+            row.update(
+                keyword_score=round(keyword_score, 4),
+                vector_score=round(vector_score, 4),
+                source_weight=source_weight,
+                topic_score=round(topic_score, 4),
+                time_score=round(time_score, 4),
+                retrieval_score=round(final_score, 4),
+                retrieval_mode="关键词 + 本地向量 + 来源/时间/题材权重",
+            )
+            scored_rows.append(row)
+        scored_rows.sort(
+            key=lambda row: (
+                row["retrieval_score"],
+                row["published_at"],
+            ),
+            reverse=True,
+        )
+
+        # 保证作者原文和人工体系有足够席位，再用社区观点补充。
+        source_limits = {"qa": 4, "post": 3, "manual": 3, "community": 2}
         # 同一来源最多保留三条，避免单篇长文垄断上下文。
         selected: list[dict] = []
         per_post: Counter = Counter()
         per_type: Counter = Counter()
-        for row in ordered_rows:
+        for row in scored_rows:
             if per_post[row["post_url"]] >= 3:
                 continue
             if per_type[row["source_type"]] >= source_limits.get(row["source_type"], 2):
                 continue
-            selected.append(dict(row))
+            selected.append(row)
             per_post[row["post_url"]] += 1
             per_type[row["source_type"]] += 1
             if len(selected) >= limit:
                 break
-        # 配额没有填满时，按原始相关度顺序补齐。
+        # 配额没有填满时，按混合得分补齐。
         selected_ids = {item["id"] for item in selected}
-        for row in rows:
+        for row in scored_rows:
             if len(selected) >= limit:
                 break
             if row["id"] in selected_ids or per_post[row["post_url"]] >= 3:
                 continue
-            selected.append(dict(row))
+            selected.append(row)
             selected_ids.add(row["id"])
             per_post[row["post_url"]] += 1
         return selected

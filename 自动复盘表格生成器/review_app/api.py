@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import json
 import os
@@ -32,7 +32,7 @@ SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
     "https://fupan-cockpit.junxicai1.chatgpt.site",
 ).rstrip("/")
-SERVICE_VERSION = "1.3.0"
+SERVICE_VERSION = "1.4.0"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
 DOCUMENT_DIR = PROJECT_DIR / "output"
 
@@ -283,6 +283,19 @@ def _run_fetch_review(job_id: str, review_date: str) -> None:
 
 
 def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
+    def finish_updates() -> dict:
+        current = JOB_MANAGER.snapshot(job_id) or {}
+        started_at = current.get("started_at", "")
+        try:
+            started = datetime.fromisoformat(started_at)
+            duration_ms = round((datetime.now() - started).total_seconds() * 1000)
+        except (TypeError, ValueError):
+            duration_ms = 0
+        return {
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "duration_ms": duration_ms,
+        }
+
     def progress(message: str, current: int, total: int) -> None:
         JOB_MANAGER.update(
             job_id,
@@ -317,9 +330,15 @@ def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
             message=message,
             current=current.get("total", 1),
             result=result,
+            **finish_updates(),
         )
     except Exception as exc:
-        JOB_MANAGER.update(job_id, status="failed", message=str(exc))
+        JOB_MANAGER.update(
+            job_id,
+            status="failed",
+            message=str(exc),
+            **finish_updates(),
+        )
 
 
 @app.post("/api/fetch-review-async")
@@ -383,6 +402,9 @@ def _start_analysis_job(
         "current": 0,
         "total": 1 + len(selected),
         "retry_of": retry_of,
+        "review_date": payload.review_date,
+        "filename": payload.filename,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
         "request_fingerprint": _analysis_fingerprint(payload),
         "branches": {
             "excel": {
@@ -448,6 +470,47 @@ def recent_generation_jobs(
 ) -> dict:
     _verify_token(x_review_token)
     return {"jobs": JOB_MANAGER.store.recent(limit)}
+
+
+@app.get("/api/runs")
+def recent_run_records(
+    limit: int = 20,
+    x_review_token: str | None = Header(default=None),
+) -> dict:
+    _verify_token(x_review_token)
+    records = []
+    for item in JOB_MANAGER.store.recent(50):
+        if item.get("kind") != "analysis":
+            continue
+        result = item.get("result") or {}
+        records.append(
+            {
+                "job_id": item["job_id"],
+                "status": item.get("status", ""),
+                "message": item.get("message", ""),
+                "review_date": item.get("review_date", ""),
+                "filename": item.get("filename", ""),
+                "started_at": item.get("started_at", item.get("created_at", "")),
+                "finished_at": item.get("finished_at", ""),
+                "duration_ms": item.get("duration_ms", 0),
+                "retry_of": item.get("retry_of", ""),
+                "branches": item.get("branches") or {},
+                "sources": [
+                    {
+                        "title": source.get("title", ""),
+                        "source_type": source.get("source_type", ""),
+                        "source_url": source.get("source_url", ""),
+                        "retrieval_score": source.get("retrieval_score", 0),
+                    }
+                    for source in result.get("sources", [])
+                ],
+                "excel_filename": result.get("excel_filename", ""),
+                "document_filename": result.get("document_filename", ""),
+            }
+        )
+        if len(records) >= max(1, min(limit, 50)):
+            break
+    return {"runs": records}
 
 
 @app.post("/api/sync")

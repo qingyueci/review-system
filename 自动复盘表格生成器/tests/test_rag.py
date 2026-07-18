@@ -117,10 +117,40 @@ def test_knowledge_store_keeps_question_and_answer_together(tmp_path):
         store.upsert_post(post)
         results = store.search("首板出身 个股任务 机器人", limit=5)
         assert results
+        assert results[0]["retrieval_score"] > 0
+        assert "本地向量" in results[0]["retrieval_mode"]
         combined = "\n".join(item["content"] for item in results)
         assert "用户问题" in combined
         assert "刺大回复" in combined
         assert store.stats()["community_comments"] == 1
+
+
+def test_hybrid_search_uses_vector_concepts_and_source_weight(tmp_path):
+    with KnowledgeStore(tmp_path / "knowledge.db") as store:
+        post = {
+            "url": "https://example.com/source",
+            "title": "布局讨论",
+            "published_at": "2026-07-18T10:00",
+        }
+        content = "该股承担板块角色，需要观察协同和带动。"
+        store._insert_chunk(
+            "qa", "qa-1", post, content, post["url"], 0,
+        )
+        store._insert_chunk(
+            "community", "community-1", post, content, post["url"] + "#2", 0,
+        )
+        store.rebuild_fts()
+
+        results = store.search("这只股票的使命是什么", limit=5)
+
+        assert results
+        assert results[0]["source_type"] == "qa"
+        assert results[0]["vector_score"] > 0
+        assert results[0]["source_weight"] == 1.0
+        community = next(
+            item for item in results if item["source_type"] == "community"
+        )
+        assert results[0]["retrieval_score"] > community["retrieval_score"]
 
 
 def test_manual_system_docx_is_imported_as_rag_source(tmp_path):

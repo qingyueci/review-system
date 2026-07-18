@@ -1,10 +1,12 @@
 from io import BytesIO
 import json
+from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from openpyxl import load_workbook
 
 from .config import API_BASE_URL, API_MAX_RETRIES, API_TIMEOUT_SECONDS, MODEL_NAME
+from .model_metrics import capture_model_metrics
 
 
 ANALYSIS_SYSTEM_PROMPT = """你是“A股短线布局任务分析助手”。你只能基于用户当日复盘和检索到的延边刺客公开历史资料进行分析。
@@ -76,13 +78,20 @@ def build_source_context(sources: list[dict]) -> str:
             f"标题：{source['title']}\n"
             f"日期：{source['published_at'][:10]}\n"
             f"类型：{labels.get(source['source_type'], '公开资料')}\n"
+            f"混合检索相关度：{source.get('retrieval_score', 0):.3f}\n"
             f"原文链接：{source['source_url']}\n"
             f"内容：{content}"
         )
     return "\n\n".join(blocks)
 
 
-def analyze_with_rag(api_key: str, review_text: str, sources: list[dict]) -> str:
+def analyze_with_rag(
+    api_key: str,
+    review_text: str,
+    sources: list[dict],
+    *,
+    metrics: dict[str, Any] | None = None,
+) -> str:
     if not api_key.strip():
         raise ValueError("请填写 Kimi Code API Key，或设置 KIMI_API_KEY 环境变量")
     if not review_text.strip():
@@ -135,4 +144,5 @@ def analyze_with_rag(api_key: str, review_text: str, sources: list[dict]) -> str
     content = response.choices[0].message.content if response.choices else None
     if not content:
         raise RuntimeError("Kimi Code 返回了空分析")
+    capture_model_metrics(response, metrics)
     return content.strip()

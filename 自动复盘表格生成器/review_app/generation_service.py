@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime
+import inspect
 import os
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from .analysis_parser import parse_analysis_sections, parse_task_table
@@ -19,8 +21,8 @@ from .validation import validate_data
 
 ProgressCallback = Callable[[str, int, int], None]
 BranchCallback = Callable[[str, dict], None]
-ExcelParser = Callable[[str, str], dict]
-WordAnalyzer = Callable[[str, str, list[dict]], str]
+ExcelParser = Callable[..., dict]
+WordAnalyzer = Callable[..., str]
 
 
 def _public_source(source: dict) -> dict:
@@ -37,7 +39,33 @@ def _public_source(source: dict) -> dict:
         "source_url": source["source_url"],
         "excerpt": source["content"][:360],
         "source_type": source["source_type"],
+        "retrieval_score": source.get("retrieval_score", 0),
+        "retrieval_mode": source.get("retrieval_mode", ""),
     }
+
+
+def _call_with_metrics(function: Callable, *args, metrics: dict) -> Any:
+    parameters = inspect.signature(function).parameters.values()
+    accepts_metrics = any(
+        parameter.name == "metrics"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_metrics:
+        return function(*args, metrics=metrics)
+    return function(*args)
+
+
+def _error_type(message: str) -> str:
+    if "额度不足" in message or "限流" in message or "HTTP 429" in message or "HTTP 499" in message:
+        return "quota_or_rate_limit"
+    if "超时" in message or "没有返回完整" in message:
+        return "timeout"
+    if "密钥无效" in message or "没有模型权限" in message:
+        return "authentication"
+    if "无法连接" in message or "网络" in message:
+        return "network"
+    return "generation_error"
 
 
 def _generate_excel_artifact(
@@ -46,9 +74,12 @@ def _generate_excel_artifact(
     review_date: str,
     document_dir: Path,
     parse_excel: ExcelParser,
+    metrics: dict,
 ) -> dict:
     """沿用原 Excel 解析与排版链路，不改变既有工作簿格式。"""
-    data = validate_data(parse_excel(api_key, review_text))
+    data = validate_data(
+        _call_with_metrics(parse_excel, api_key, review_text, metrics=metrics)
+    )
     if review_date:
         data["meta"]["date"] = review_date
     content, filename = generate_excel(data)
@@ -65,8 +96,15 @@ def _generate_word_artifact(
     review_date: str,
     document_dir: Path,
     analyze_word: WordAnalyzer,
+    metrics: dict,
 ) -> dict:
-    analysis = analyze_word(api_key, review_text, sources)
+    analysis = _call_with_metrics(
+        analyze_word,
+        api_key,
+        review_text,
+        sources,
+        metrics=metrics,
+    )
     document, filename = generate_analysis_docx(
         analysis,
         sources,
@@ -124,20 +162,13 @@ def generate_review_outputs(
         }
     elif payload.generate_excel:
         runners["excel"] = lambda: _generate_excel_artifact(
-            api_key,
-            review_text,
-            payload.review_date,
-            document_dir,
-            parse_excel,
+            api_key, review_text, payload.review_date, document_dir, parse_excel,
+            branch_runtime["excel"]["metrics"],
         )
     if payload.generate_word:
         runners["word"] = lambda: _generate_word_artifact(
-            api_key,
-            review_text,
-            sources,
-            payload.review_date,
-            document_dir,
-            analyze_word,
+            api_key, review_text, sources, payload.review_date, document_dir,
+            analyze_word, branch_runtime["word"]["metrics"],
         )
 
     total = max(1, len(runners) + 1)
@@ -160,11 +191,18 @@ def generate_review_outputs(
         return result
 
     labels = {"excel": "Excel 整理", "word": "Word 布局分析"}
+    branch_runtime: dict[str, dict[str, Any]] = {}
 
     def run_branch(name: str, runner):
+        branch_runtime[name] = {
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "started_clock": perf_counter(),
+            "metrics": {},
+        }
         branches[name] = {
             "status": "running",
             "message": f"正在执行{labels[name]}",
+            "started_at": branch_runtime[name]["started_at"],
         }
         if branch_update:
             branch_update(name, branches[name])
@@ -179,15 +217,50 @@ def generate_review_outputs(
         for future in as_completed(futures):
             name = futures[future]
             completed_count += 1
+            runtime = branch_runtime[name]
+            finished_at = datetime.now().isoformat(timespec="seconds")
+            duration_ms = round(
+                (perf_counter() - runtime["started_clock"]) * 1000
+            )
+            details = {
+                "started_at": runtime["started_at"],
+                "finished_at": finished_at,
+                "duration_ms": duration_ms,
+                "model": runtime["metrics"].get("model", ""),
+                "usage": runtime["metrics"].get(
+                    "usage",
+                    {"available": False},
+                ),
+                "source_count": len(sources) if name == "word" else 0,
+                "source_refs": (
+                    [
+                        {
+                            "title": source["title"],
+                            "source_type": source["source_type"],
+                            "source_url": source["source_url"],
+                            "retrieval_score": source.get("retrieval_score", 0),
+                        }
+                        for source in sources
+                    ]
+                    if name == "word"
+                    else []
+                ),
+            }
             try:
                 result.update(future.result())
                 branches[name] = {
                     "status": "succeeded",
                     "message": f"{labels[name]}已生成并保存",
+                    **details,
                 }
             except Exception as exc:
                 message = str(exc) or f"{labels[name]}生成失败"
-                branches[name] = {"status": "failed", "message": message}
+                branches[name] = {
+                    "status": "failed",
+                    "message": message,
+                    "error_type": _error_type(message),
+                    **details,
+                }
                 result["warnings"].append(f"{labels[name]}失败：{message}")
             if branch_update:
                 branch_update(name, branches[name])

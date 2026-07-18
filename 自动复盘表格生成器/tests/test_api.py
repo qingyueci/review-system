@@ -90,7 +90,7 @@ def test_status_requires_token() -> None:
         headers={"X-Review-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 200
-    assert response.json()["service_version"] == "1.3.0"
+    assert response.json()["service_version"] == "1.4.0"
     assert response.json()["stats"]["chunks"] > 0
 
 
@@ -191,6 +191,16 @@ def test_async_analysis_returns_job_and_result(monkeypatch, tmp_path) -> None:
     assert job["result"]["tasks"][0]["stock"] == "甲股"
     assert job["result"]["excel_filename"].endswith(".xlsx")
     assert job["current"] == job["total"] == 3
+    assert job["branches"]["excel"]["duration_ms"] >= 0
+    assert job["branches"]["word"]["source_count"] >= 0
+    assert job["branches"]["word"]["usage"]["available"] is False
+
+    runs = client.get("/api/runs?limit=5", headers=headers)
+    assert runs.status_code == 200
+    record = runs.json()["runs"][0]
+    assert record["job_id"] == started.json()["job_id"]
+    assert record["review_date"] == "2026-07-18"
+    assert record["branches"]["excel"]["status"] == "succeeded"
 
 
 def test_duplicate_running_analysis_reuses_same_job(monkeypatch) -> None:
