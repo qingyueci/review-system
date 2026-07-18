@@ -2,7 +2,14 @@
 
 import { ChangeEvent, useEffect, useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8765";
+import {
+  BranchState,
+  Job,
+  PersistedJob,
+  StartedJob,
+  requestLocal,
+  waitForJob,
+} from "./lib/review-api";
 
 type Task = {
   id: string;
@@ -47,11 +54,6 @@ type AnalysisResult = {
   warnings: string[];
 };
 
-type BranchState = {
-  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
-  message: string;
-};
-
 type GenerationMode = "both" | "excel" | "word";
 
 type AnalysisTask = {
@@ -62,22 +64,6 @@ type AnalysisTask = {
   relations: string;
   success_signal: string;
   failure_signal: string;
-};
-
-type Job<T = unknown> = {
-  status: "pending" | "running" | "succeeded" | "failed";
-  message: string;
-  current: number;
-  total: number;
-  branches?: Record<"excel" | "word", BranchState>;
-  stats?: Stats;
-  result?: T;
-};
-
-type PersistedJob<T = unknown> = Job<T> & {
-  job_id: string;
-  created_at: string;
-  updated_at: string;
 };
 
 type FetchReviewResult = {
@@ -293,77 +279,6 @@ function mergeAnalysisResults(
     },
     warnings: incoming.warnings,
   };
-}
-
-async function requestLocal<T>(
-  token: string,
-  path: string,
-  init: RequestInit & { timeoutMs?: number } = {},
-): Promise<T> {
-  const { timeoutMs = 15_000, ...fetchInit } = init;
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${API_BASE}${path}`, {
-      ...fetchInit,
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Review-Token": token,
-        ...(fetchInit.headers ?? {}),
-      },
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.detail || `本机服务返回错误：${response.status}`);
-    }
-    return payload as T;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("本机服务响应较慢，正在重新连接");
-    }
-    if (error instanceof TypeError) {
-      throw new Error("本机服务连接中断，请重新双击启动器");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-async function waitForJob<T>(
-  token: string,
-  jobId: string,
-  onUpdate: (job: Job<T>) => void,
-): Promise<Job<T>> {
-  let consecutiveFailures = 0;
-  while (true) {
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    let job: Job<T>;
-    try {
-      job = await requestLocal<Job<T>>(token, `/api/jobs/${jobId}`);
-    } catch (error) {
-      consecutiveFailures += 1;
-      if (consecutiveFailures < 6) {
-        onUpdate({
-          status: "running",
-          message: "本机服务响应较慢，仍在等待后台任务",
-          current: 0,
-          total: 1,
-        });
-        continue;
-      }
-      throw error;
-    }
-    consecutiveFailures = 0;
-    onUpdate(job);
-    if (job.status === "failed") {
-      throw new Error(job.message || "后台任务执行失败");
-    }
-    if (job.status === "succeeded") {
-      return job;
-    }
-  }
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -686,7 +601,7 @@ export default function Home() {
     setActionMessage(`正在启动：${generationLabel}……`);
     try {
       const contentBase64 = reviewFile ? await fileToBase64(reviewFile) : "";
-      const started = await requestLocal<{ job_id: string; status: string }>(
+      const started = await requestLocal<StartedJob>(
         token,
         "/api/analyze-async",
         {
@@ -707,6 +622,11 @@ export default function Home() {
         "review-active-generation",
         started.job_id,
       );
+      if (started.reused) {
+        const message = "相同复盘正在生成，已接回原任务，不会重复调用模型。";
+        setActionMessage(message);
+        showNotice(message);
+      }
       const completed = await waitForJob<AnalysisResult>(
         token,
         started.job_id,
@@ -748,18 +668,24 @@ export default function Home() {
     setIsAnalyzing(true);
     setActionMessage(`正在单独重试 ${label}……`);
     try {
-      const started = await requestLocal<{
-        job_id: string;
-        status: string;
-      }>(token, `/api/jobs/${resultJobId}/retry`, {
+      const started = await requestLocal<StartedJob>(
+        token,
+        `/api/jobs/${resultJobId}/retry`,
+        {
         method: "POST",
         body: JSON.stringify({ branch, api_key: apiKey }),
-      });
+        },
+      );
       setResultJobId(started.job_id);
       window.localStorage.setItem(
         "review-active-generation",
         started.job_id,
       );
+      if (started.reused) {
+        const message = `${label} 已在重试中，已接回原任务，不会重复调用模型。`;
+        setActionMessage(message);
+        showNotice(message);
+      }
       const completed = await waitForJob<AnalysisResult>(
         token,
         started.job_id,

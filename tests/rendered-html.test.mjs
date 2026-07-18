@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const html = await readFile("app/page.tsx", "utf8");
+const apiClient = await readFile("app/lib/review-api.ts", "utf8");
+const appSource = `${html}\n${apiClient}`;
 const errorPage = await readFile("app/error.tsx", "utf8");
 const globalErrorPage = await readFile("app/global-error.tsx", "utf8");
 
@@ -29,13 +31,14 @@ test("页面不再包含脚手架预览", () => {
 });
 
 test("耗时操作使用后台任务和进度轮询", () => {
-  assert.match(html, /\/api\/fetch-review-async/);
-  assert.match(html, /\/api\/analyze-async/);
-  assert.match(html, /\/api\/jobs\/recent/);
-  assert.match(html, /\/retry/);
-  assert.match(html, /waitForJob/);
-  assert.match(html, /review-active-generation/);
-  assert.doesNotMatch(html, /180_000/);
+  assert.match(appSource, /\/api\/fetch-review-async/);
+  assert.match(appSource, /\/api\/analyze-async/);
+  assert.match(appSource, /\/api\/jobs\/recent/);
+  assert.match(appSource, /\/retry/);
+  assert.match(appSource, /waitForJob/);
+  assert.match(appSource, /review-active-generation/);
+  assert.match(appSource, /不会重复调用模型/);
+  assert.doesNotMatch(appSource, /180_000/);
 });
 
 test("分析结果异常时不会直接白屏", () => {
