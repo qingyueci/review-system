@@ -26,6 +26,7 @@ COMMUNITY_MAX_PER_POST = int(os.getenv("TGB_COMMUNITY_MAX_PER_POST", "20"))
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("REVIEW_DATA_DIR", PROJECT_DIR / "data"))
 KNOWLEDGE_DB_PATH = Path(os.getenv("REVIEW_KNOWLEDGE_DB", DATA_DIR / "review_knowledge.db"))
+JOB_DB_PATH = Path(os.getenv("REVIEW_JOB_DB", DATA_DIR / "review_jobs.db"))
 _manual_system_docx = os.getenv("REVIEW_MANUAL_SYSTEM_DOCX", "").strip()
 MANUAL_SYSTEM_DOCX = (
     Path(_manual_system_docx)

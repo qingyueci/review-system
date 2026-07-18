@@ -2,6 +2,7 @@ import base64
 import time
 
 from fastapi.testclient import TestClient
+import pytest
 
 from review_app.api import (
     SERVICE_TOKEN,
@@ -11,6 +12,20 @@ from review_app.api import (
     parse_analysis_sections,
     parse_task_table,
 )
+from review_app.job_store import JobStore
+
+
+@pytest.fixture(autouse=True)
+def isolate_persisted_jobs(monkeypatch, tmp_path) -> None:
+    import review_app.api as api_module
+
+    monkeypatch.setattr(
+        api_module,
+        "JOB_STORE",
+        JobStore(tmp_path / "review_jobs.db"),
+    )
+    with api_module.jobs_lock:
+        api_module.jobs.clear()
 
 
 def _structured_review() -> dict:
@@ -76,7 +91,7 @@ def test_status_requires_token() -> None:
         headers={"X-Review-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 200
-    assert response.json()["service_version"] == "1.1.0"
+    assert response.json()["service_version"] == "1.2.0"
     assert response.json()["stats"]["chunks"] > 0
 
 
@@ -216,6 +231,73 @@ def test_parallel_generation_keeps_excel_when_word_fails(monkeypatch, tmp_path) 
     assert "额度不足" in payload["warnings"][0]
     assert len(list(tmp_path.glob("*.xlsx"))) == 1
     assert not list(tmp_path.glob("*.docx"))
+
+
+def test_generation_job_survives_memory_clear_and_retries_failed_word(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import review_app.api as api_module
+
+    analysis = "# 今日核心判断\n只保留核心任务"
+    monkeypatch.setattr(api_module, "DOCUMENT_DIR", tmp_path)
+    monkeypatch.setattr(
+        api_module,
+        "parse_with_kimi",
+        lambda *_args, **_kwargs: _structured_review(),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "analyze_with_rag",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Kimi Code 当前额度不足")
+        ),
+    )
+    client = TestClient(app, base_url="http://127.0.0.1")
+    headers = {"X-Review-Token": SERVICE_TOKEN}
+    started = client.post(
+        "/api/analyze-async",
+        headers=headers,
+        json={
+            "filename": "复盘.txt",
+            "text": "首板出身与板块布局",
+            "review_date": "2026-07-18",
+            "api_key": "test-key",
+        },
+    )
+    first_job_id = started.json()["job_id"]
+    first_job = _wait_for_job(client, headers, first_job_id)
+    assert first_job["branches"]["word"]["status"] == "failed"
+    assert first_job["result"]["excel_filename"].endswith(".xlsx")
+
+    with api_module.jobs_lock:
+        api_module.jobs.clear()
+    restored = client.get(
+        f"/api/jobs/{first_job_id}",
+        headers=headers,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["result"]["excel_filename"].endswith(".xlsx")
+
+    monkeypatch.setattr(
+        api_module,
+        "analyze_with_rag",
+        lambda *_args, **_kwargs: analysis,
+    )
+    retried = client.post(
+        f"/api/jobs/{first_job_id}/retry",
+        headers=headers,
+        json={"branch": "word", "api_key": "test-key"},
+    )
+    assert retried.status_code == 200
+    retry_job = _wait_for_job(client, headers, retried.json()["job_id"])
+    assert retry_job["result"]["document_filename"].endswith(".docx")
+    assert retry_job["branches"]["excel"]["status"] == "skipped"
+    assert retry_job["branches"]["word"]["status"] == "succeeded"
+
+    recent = client.get("/api/jobs/recent?limit=2", headers=headers)
+    assert recent.status_code == 200
+    assert recent.json()["jobs"][0]["job_id"] == retried.json()["job_id"]
 
 
 def test_async_fetch_review_returns_job(monkeypatch) -> None:

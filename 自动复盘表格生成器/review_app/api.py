@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import secrets
 from threading import Lock, Thread
-from typing import Any
+from typing import Any, Literal
 
 from docx import Document
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -22,6 +22,7 @@ from .config import DATA_DIR, PROJECT_DIR
 from .crawler import TgbCrawler
 from .docx_export import generate_analysis_docx
 from .excel import generate_excel
+from .job_store import JobStore
 from .knowledge import KnowledgeStore, sync_top_year
 from .llm import parse_with_kimi
 from .preprocessing import preprocess_text
@@ -32,7 +33,7 @@ SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
     "https://fupan-cockpit.junxicai1.chatgpt.site",
 ).rstrip("/")
-SERVICE_VERSION = "1.1.0"
+SERVICE_VERSION = "1.2.0"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
 MAX_FILE_BYTES = 15 * 1024 * 1024
 MAX_TEXT_CHARS = 120_000
@@ -54,6 +55,8 @@ def get_service_token() -> str:
 SERVICE_TOKEN = get_service_token()
 jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
+JOB_STORE = JobStore()
+JOB_STORE.mark_interrupted()
 
 
 class AnalyzeRequest(BaseModel):
@@ -64,10 +67,74 @@ class AnalyzeRequest(BaseModel):
     api_key: str = Field(default="", max_length=300)
     generate_excel: bool = True
     generate_word: bool = True
+    input_is_excel: bool = False
+
+
+class RetryGenerationRequest(BaseModel):
+    branch: Literal["excel", "word"]
+    api_key: str = Field(default="", max_length=300)
 
 
 class FetchReviewRequest(BaseModel):
     review_date: str
+
+
+def _register_job(
+    job_id: str,
+    job: dict[str, Any],
+    request_payload: dict[str, Any] | None = None,
+) -> None:
+    with jobs_lock:
+        jobs[job_id] = dict(job)
+        snapshot = dict(jobs[job_id])
+    if job.get("kind") == "analysis":
+        JOB_STORE.save(job_id, snapshot, request_payload)
+
+
+def _update_job(job_id: str, **updates: Any) -> dict[str, Any]:
+    with jobs_lock:
+        if job_id not in jobs:
+            stored = JOB_STORE.get(job_id)
+            if not stored:
+                raise KeyError(job_id)
+            jobs[job_id] = stored
+        jobs[job_id].update(updates)
+        snapshot = dict(jobs[job_id])
+    if snapshot.get("kind") == "analysis":
+        JOB_STORE.save(job_id, snapshot)
+    return snapshot
+
+
+def _job_snapshot(job_id: str) -> dict[str, Any] | None:
+    with jobs_lock:
+        current = jobs.get(job_id)
+        if current:
+            return dict(current)
+    stored = JOB_STORE.get(job_id)
+    if stored:
+        with jobs_lock:
+            jobs[job_id] = dict(stored)
+        return stored
+    return None
+
+
+def _normalize_analysis_request(payload: AnalyzeRequest) -> AnalyzeRequest:
+    review_text = preprocess_text(extract_review_text(payload))
+    is_excel = payload.input_is_excel or (
+        Path(payload.filename).suffix.lower() == ".xlsx"
+        and bool(payload.content_base64)
+    )
+    return payload.model_copy(
+        update={
+            "text": review_text,
+            "content_base64": "",
+            "input_is_excel": is_excel,
+        }
+    )
+
+
+def _persistable_request(payload: AnalyzeRequest) -> dict[str, Any]:
+    return payload.model_dump(exclude={"api_key", "content_base64"})
 
 
 app = FastAPI(title="复盘驾驶舱本地服务", version=SERVICE_VERSION)
@@ -350,8 +417,11 @@ def _analysis_result(payload: AnalyzeRequest, progress=None, branch_update=None)
     }
 
     is_excel_input = (
-        Path(payload.filename).suffix.lower() == ".xlsx"
-        and bool(payload.content_base64)
+        payload.input_is_excel
+        or (
+            Path(payload.filename).suffix.lower() == ".xlsx"
+            and bool(payload.content_base64)
+        )
     )
     if payload.generate_excel and is_excel_input:
         branches["excel"] = {
@@ -562,17 +632,19 @@ def _run_fetch_review(job_id: str, review_date: str) -> None:
 
 def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
     def progress(message: str, current: int, total: int) -> None:
-        with jobs_lock:
-            jobs[job_id].update(
-                status="running",
-                message=message,
-                current=current,
-                total=total,
-            )
+        _update_job(
+            job_id,
+            status="running",
+            message=message,
+            current=current,
+            total=total,
+        )
 
     def branch_update(name: str, state: dict) -> None:
-        with jobs_lock:
-            jobs[job_id].setdefault("branches", {})[name] = dict(state)
+        current = _job_snapshot(job_id) or {}
+        branches = dict(current.get("branches") or {})
+        branches[name] = dict(state)
+        _update_job(job_id, branches=branches)
 
     try:
         result = _analysis_result(payload, progress, branch_update)
@@ -586,16 +658,16 @@ def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
             message = "Word 已完成；Excel 未生成，可在额度恢复后重试"
         else:
             message = "输入文件已保留，无需重复生成 Excel"
-        with jobs_lock:
-            jobs[job_id].update(
-                status="succeeded",
-                message=message,
-                current=jobs[job_id]["total"],
-                result=result,
-            )
+        current = _job_snapshot(job_id) or {}
+        _update_job(
+            job_id,
+            status="succeeded",
+            message=message,
+            current=current.get("total", 1),
+            result=result,
+        )
     except Exception as exc:
-        with jobs_lock:
-            jobs[job_id].update(status="failed", message=str(exc))
+        _update_job(job_id, status="failed", message=str(exc))
 
 
 @app.post("/api/fetch-review-async")
@@ -627,27 +699,94 @@ def start_analysis(
     x_review_token: str | None = Header(default=None),
 ) -> dict:
     _verify_token(x_review_token)
+    if not payload.generate_excel and not payload.generate_word:
+        raise HTTPException(status_code=400, detail="至少选择生成 Excel 或 Word 中的一项")
+    try:
+        normalized = _normalize_analysis_request(payload)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _start_analysis_job(normalized)
+
+
+def _start_analysis_job(
+    payload: AnalyzeRequest,
+    *,
+    retry_of: str = "",
+) -> dict:
     job_id = secrets.token_urlsafe(12)
-    with jobs_lock:
-        jobs[job_id] = {
-            "kind": "analysis",
-            "status": "pending",
-            "message": "准备清洗每日复盘并生成文件",
-            "current": 0,
-            "total": 3,
-            "branches": {
-                "excel": {
-                    "status": "pending" if payload.generate_excel else "skipped",
-                    "message": "等待整理完整复盘",
-                },
-                "word": {
-                    "status": "pending" if payload.generate_word else "skipped",
-                    "message": "等待生成核心布局分析",
-                },
+    selected = [
+        label
+        for enabled, label in (
+            (payload.generate_excel, "Excel"),
+            (payload.generate_word, "Word"),
+        )
+        if enabled
+    ]
+    job = {
+        "kind": "analysis",
+        "status": "pending",
+        "message": f"准备生成{' + '.join(selected)}",
+        "current": 0,
+        "total": 1 + len(selected),
+        "retry_of": retry_of,
+        "branches": {
+            "excel": {
+                "status": "pending" if payload.generate_excel else "skipped",
+                "message": (
+                    "等待整理完整复盘"
+                    if payload.generate_excel
+                    else "本次未选择 Excel"
+                ),
             },
-        }
+            "word": {
+                "status": "pending" if payload.generate_word else "skipped",
+                "message": (
+                    "等待生成核心布局分析"
+                    if payload.generate_word
+                    else "本次未选择 Word"
+                ),
+            },
+        },
+    }
+    _register_job(
+        job_id,
+        job,
+        request_payload=_persistable_request(payload),
+    )
     Thread(target=_run_analysis, args=(job_id, payload), daemon=True).start()
     return {"job_id": job_id, "status": "pending"}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_generation(
+    job_id: str,
+    payload: RetryGenerationRequest,
+    x_review_token: str | None = Header(default=None),
+) -> dict:
+    _verify_token(x_review_token)
+    previous = _job_snapshot(job_id)
+    request_payload = JOB_STORE.get_request(job_id)
+    if not previous or not request_payload:
+        raise HTTPException(status_code=404, detail="没有找到可重试的生成任务")
+    branch_state = (previous.get("branches") or {}).get(payload.branch) or {}
+    if branch_state.get("status") != "failed":
+        raise HTTPException(status_code=400, detail="只能单独重试失败的生成项")
+    request_payload.update(
+        api_key=payload.api_key,
+        generate_excel=payload.branch == "excel",
+        generate_word=payload.branch == "word",
+    )
+    normalized = AnalyzeRequest.model_validate(request_payload)
+    return _start_analysis_job(normalized, retry_of=job_id)
+
+
+@app.get("/api/jobs/recent")
+def recent_generation_jobs(
+    limit: int = 10,
+    x_review_token: str | None = Header(default=None),
+) -> dict:
+    _verify_token(x_review_token)
+    return {"jobs": JOB_STORE.recent(limit)}
 
 
 @app.post("/api/sync")
@@ -683,8 +822,7 @@ def get_job(
     x_review_token: str | None = Header(default=None),
 ) -> dict:
     _verify_token(x_review_token)
-    with jobs_lock:
-        job = jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="没有找到这次更新任务")
-        return dict(job)
+    job = _job_snapshot(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="没有找到这次更新任务")
+    return job
