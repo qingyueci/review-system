@@ -20,3 +20,10 @@ test("页面不再包含脚手架预览", () => {
   assert.doesNotMatch(html, /codex-preview/);
   assert.doesNotMatch(html, /Your site is taking shape/);
 });
+
+test("耗时操作使用后台任务和进度轮询", () => {
+  assert.match(html, /\/api\/fetch-review-async/);
+  assert.match(html, /\/api\/analyze-async/);
+  assert.match(html, /waitForJob/);
+  assert.doesNotMatch(html, /180_000/);
+});

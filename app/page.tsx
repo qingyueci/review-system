@@ -53,12 +53,20 @@ type AnalysisTask = {
   failure_signal: string;
 };
 
-type Job = {
+type Job<T = unknown> = {
   status: "pending" | "running" | "succeeded" | "failed";
   message: string;
   current: number;
   total: number;
   stats?: Stats;
+  result?: T;
+};
+
+type FetchReviewResult = {
+  title: string;
+  review_date: string;
+  source_url: string;
+  text: string;
 };
 
 type HistoryDocument = {
@@ -150,18 +158,19 @@ function cleanMarkdown(value: string) {
 async function requestLocal<T>(
   token: string,
   path: string,
-  init: RequestInit = {},
+  init: RequestInit & { timeoutMs?: number } = {},
 ): Promise<T> {
+  const { timeoutMs = 15_000, ...fetchInit } = init;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 180_000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
-      ...init,
+      ...fetchInit,
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         "X-Review-Token": token,
-        ...(init.headers ?? {}),
+        ...(fetchInit.headers ?? {}),
       },
     });
     const payload = await response.json().catch(() => ({}));
@@ -171,11 +180,49 @@ async function requestLocal<T>(
     return payload as T;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("操作超时，请检查网络后重试");
+      throw new Error("本机服务响应较慢，正在重新连接");
+    }
+    if (error instanceof TypeError) {
+      throw new Error("本机服务连接中断，请重新双击启动器");
     }
     throw error;
   } finally {
     window.clearTimeout(timeout);
+  }
+}
+
+async function waitForJob<T>(
+  token: string,
+  jobId: string,
+  onUpdate: (job: Job<T>) => void,
+): Promise<Job<T>> {
+  let consecutiveFailures = 0;
+  while (true) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    let job: Job<T>;
+    try {
+      job = await requestLocal<Job<T>>(token, `/api/jobs/${jobId}`);
+    } catch (error) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures < 6) {
+        onUpdate({
+          status: "running",
+          message: "本机服务响应较慢，仍在等待后台任务",
+          current: 0,
+          total: 1,
+        });
+        continue;
+      }
+      throw error;
+    }
+    consecutiveFailures = 0;
+    onUpdate(job);
+    if (job.status === "failed") {
+      throw new Error(job.message || "后台任务执行失败");
+    }
+    if (job.status === "succeeded") {
+      return job;
+    }
   }
 }
 
@@ -299,23 +346,37 @@ export default function Home() {
   async function handleFetchReview() {
     if (!requireConnection()) return;
     setIsFetching(true);
+    setActionMessage("正在启动自爬取任务……");
     try {
-      const result = await requestLocal<{
-        title: string;
-        review_date: string;
-        source_url: string;
-        text: string;
-      }>(token, "/api/fetch-review", {
-        method: "POST",
-        body: JSON.stringify({ review_date: reviewDate }),
-      });
+      const started = await requestLocal<{ job_id: string; status: string }>(
+        token,
+        "/api/fetch-review-async",
+        {
+          method: "POST",
+          body: JSON.stringify({ review_date: reviewDate }),
+        },
+      );
+      const completed = await waitForJob<FetchReviewResult>(
+        token,
+        started.job_id,
+        (job) =>
+          setActionMessage(
+            `${job.message}${job.total > 1 ? `（${job.current}/${job.total}）` : ""}`,
+          ),
+      );
+      if (!completed.result) {
+        throw new Error("自爬取完成，但没有返回复盘正文");
+      }
+      const result = completed.result;
       setCrawledText(result.text);
       setCrawledSource(result.source_url);
       setReviewFile(null);
       setActionMessage("复盘正文已载入，可以开始 RAG 分析。");
       showNotice(`已自爬取「${result.title}」，无需手动复制。`);
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "自爬取失败");
+      const message = error instanceof Error ? error.message : "自爬取失败";
+      setActionMessage(message);
+      showNotice(message);
     } finally {
       setIsFetching(false);
     }
@@ -338,19 +399,35 @@ export default function Home() {
       return;
     }
     setIsAnalyzing(true);
-    setActionMessage("正在检索本机知识库，并按首板出身与任务关系生成分析……");
+    setActionMessage("正在启动 RAG 布局分析任务……");
     try {
       const contentBase64 = reviewFile ? await fileToBase64(reviewFile) : "";
-      const result = await requestLocal<AnalysisResult>(token, "/api/analyze", {
-        method: "POST",
-        body: JSON.stringify({
-          filename: reviewFile?.name || `${reviewDate}复盘.txt`,
-          content_base64: contentBase64,
-          text: crawledText,
-          review_date: reviewDate,
-          api_key: apiKey,
-        }),
-      });
+      const started = await requestLocal<{ job_id: string; status: string }>(
+        token,
+        "/api/analyze-async",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            filename: reviewFile?.name || `${reviewDate}复盘.txt`,
+            content_base64: contentBase64,
+            text: crawledText,
+            review_date: reviewDate,
+            api_key: apiKey,
+          }),
+        },
+      );
+      const completed = await waitForJob<AnalysisResult>(
+        token,
+        started.job_id,
+        (job) =>
+          setActionMessage(
+            `${job.message}${job.total > 1 ? `（${job.current}/${job.total}）` : ""}`,
+          ),
+      );
+      if (!completed.result) {
+        throw new Error("分析完成，但没有返回结果");
+      }
+      const result = completed.result;
       setAnalysis(result);
       setActiveNav("布局分析");
       const history = await requestLocal<{ documents: HistoryDocument[] }>(
@@ -377,20 +454,13 @@ export default function Home() {
         "/api/sync",
         { method: "POST", body: "{}" },
       );
-      let job: Job = {
-        status: "pending",
-        message: "准备更新知识库",
-        current: 0,
-        total: 1,
-      };
-      setSyncJob(job);
-      while (job.status === "pending" || job.status === "running") {
-        await new Promise((resolve) => window.setTimeout(resolve, 1200));
-        job = await requestLocal<Job>(token, `/api/jobs/${started.job_id}`);
-        setSyncJob(job);
-      }
-      if (job.status === "succeeded" && job.stats) {
-        setStats(job.stats);
+      const completed = await waitForJob<unknown>(
+        token,
+        started.job_id,
+        (job) => setSyncJob(job),
+      );
+      if (completed.stats) {
+        setStats(completed.stats);
         const refreshed = await requestLocal<{ posts: KnowledgePost[] }>(
           token,
           "/api/posts",
@@ -398,7 +468,7 @@ export default function Home() {
         setKnowledgePosts(refreshed.posts);
         showNotice("自爬取、清洗和知识库更新已完成。");
       } else {
-        showNotice(job.message || "知识库更新失败");
+        showNotice(completed.message || "知识库更新失败");
       }
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "知识库更新失败");
