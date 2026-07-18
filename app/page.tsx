@@ -2,6 +2,10 @@
 
 import { ChangeEvent, useEffect, useState } from "react";
 
+import { AnalysisSection } from "./components/AnalysisSection";
+import { HistoryDocumentsSection } from "./components/HistoryDocumentsSection";
+import { KnowledgeSection } from "./components/KnowledgeSection";
+import { TodayReviewSection } from "./components/TodayReviewSection";
 import {
   BranchState,
   Job,
@@ -10,61 +14,15 @@ import {
   requestLocal,
   waitForJob,
 } from "./lib/review-api";
-
-type Task = {
-  id: string;
-  name: string;
-  role: string;
-  origin: string;
-  task: string;
-  position: string;
-  relation: string;
-  state: "推进" | "观察" | "受阻";
-};
-
-type Stats = {
-  core_posts: number;
-  supplemental_posts: number;
-  qa_pairs: number;
-  community_comments: number;
-  manual_chunks: number;
-  chunks: number;
-  last_sync: string;
-};
-
-type Source = {
-  level: string;
-  title: string;
-  published_at: string;
-  source_url: string;
-  excerpt: string;
-  source_type: string;
-};
-
-type AnalysisResult = {
-  analysis: string;
-  sections: Record<string, string>;
-  tasks: AnalysisTask[];
-  sources: Source[];
-  document_base64: string;
-  document_filename: string;
-  excel_base64: string;
-  excel_filename: string;
-  branches: Record<"excel" | "word", BranchState>;
-  warnings: string[];
-};
-
-type GenerationMode = "both" | "excel" | "word";
-
-type AnalysisTask = {
-  stock: string;
-  origin: string;
-  original_task: string;
-  current_position: string;
-  relations: string;
-  success_signal: string;
-  failure_signal: string;
-};
+import {
+  AnalysisResult,
+  AnalysisTask,
+  GenerationMode,
+  HistoryDocument,
+  KnowledgePost,
+  Source,
+  Stats,
+} from "./lib/review-types";
 
 type FetchReviewResult = {
   title: string;
@@ -72,68 +30,6 @@ type FetchReviewResult = {
   source_url: string;
   text: string;
 };
-
-type HistoryDocument = {
-  filename: string;
-  modified_at: string;
-  size: number;
-  kind: "word" | "excel";
-};
-
-type KnowledgePost = {
-  title: string;
-  published_at: string;
-  views: number;
-  reply_count: number;
-  likes: number;
-  scope: "top_year" | "recent_qa";
-  body_truncated: boolean;
-  capture_mode: string;
-  url: string;
-};
-
-const frameworkTasks: Task[] = [
-  {
-    id: "seed",
-    name: "首板发起者",
-    role: "进攻发起",
-    origin: "主动首板",
-    task: "替板块打开空间，验证新增量",
-    position: "前排试错",
-    relation: "带动承接核心，并接受风险锚点反馈",
-    state: "推进",
-  },
-  {
-    id: "core",
-    name: "换手承接者",
-    role: "承接中枢",
-    origin: "分歧首板",
-    task: "吸收抛压，为发起者提供持续性证明",
-    position: "结构核心",
-    relation: "承接发起者，压制后排地位上升",
-    state: "观察",
-  },
-  {
-    id: "anchor",
-    name: "情绪锚点",
-    role: "风险定价",
-    origin: "逆势辨识度首板",
-    task: "提示周期强弱，决定进攻仓位上限",
-    position: "外部锚点",
-    relation: "不争龙头，但影响整个队形的风险溢价",
-    state: "受阻",
-  },
-  {
-    id: "follower",
-    name: "后排验证者",
-    role: "扩散确认",
-    origin: "题材助攻首板",
-    task: "证明板块宽度，不承担打开高度的职责",
-    position: "后排验证",
-    relation: "依赖前排；主动卡位时才可能升级任务",
-    state: "观察",
-  },
-];
 
 const emptyStats: Stats = {
   core_posts: 20,
@@ -155,13 +51,6 @@ function todayText() {
 
 function asText(value: unknown) {
   return typeof value === "string" ? value : "";
-}
-
-function cleanMarkdown(value: unknown) {
-  return asText(value)
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/^[-*]\s+/gm, "• ")
-    .trim();
 }
 
 function normalizeAnalysisResult(value: unknown): AnalysisResult {
@@ -331,17 +220,6 @@ export default function Home() {
     analysis?.document_filename || analysis?.excel_filename,
   );
   const evidence = analysis?.sources ?? [];
-  const sections = analysis?.sections ?? {};
-  const coreJudgement = sections["今日核心判断"];
-  const layoutText =
-    sections["题材之间的任务关系"] ||
-    sections["布局总图"] ||
-    sections["地位演化和相互确认"];
-  const taskText = sections["个股任务表"];
-  const tomorrowText = sections["明日竞价确认条件"];
-  const failureText = sections["判断失效条件"];
-  const displayTasks =
-    analysis?.tasks?.length ? analysis.tasks.slice(0, 4) : null;
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -465,6 +343,8 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
+    // 恢复逻辑只由连接状态触发，避免结果更新后重复接管同一任务。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, token]);
 
   function showNotice(message: string) {
@@ -858,294 +738,57 @@ export default function Home() {
           </div>
 
           {activeNav === "今日复盘" && (
-            <>
-              <section className="intake-card">
-                <div className="intake-heading">
-                  <span className="section-number">01</span>
-                  <div><span className="eyebrow">生成输入</span><h3>选择文件，或直接自爬取当日复盘</h3></div>
-                </div>
-                <div className="input-status-row">
-                  <div>
-                    <span className={reviewFile || crawledText ? "ready-dot" : "empty-dot"} />
-                    {reviewFile ? reviewFile.name : crawledText ? "已载入公开复盘正文" : "尚未载入每日复盘"}
-                    {crawledSource && <a href={crawledSource} target="_blank" rel="noreferrer">查看来源</a>}
-                  </div>
-                  {!apiKeyConfigured && (
-                    <label className="api-key-field">
-                      <span>Kimi Code Key</span>
-                      <input type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setActionMessage(""); }} placeholder="只发送到 127.0.0.1" autoComplete="off" />
-                    </label>
-                  )}
-                  {apiKeyConfigured && <span className="key-ready">本机已配置模型密钥</span>}
-                </div>
-                {actionMessage && <div className={`action-message ${isAnalyzing ? "working" : ""}`}>{actionMessage}</div>}
-                <div className="generation-mode" role="radiogroup" aria-label="生成内容">
-                  {([
-                    ["both", "同时生成", "完整 Excel + 核心 Word"],
-                    ["excel", "只生成 Excel", "完整整理，不新增观点"],
-                    ["word", "只生成 Word", "只分析核心任务"],
-                  ] as const).map(([mode, title, description]) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      role="radio"
-                      aria-checked={generationMode === mode}
-                      className={generationMode === mode ? "active" : ""}
-                      disabled={
-                        isAnalyzing ||
-                        (mode === "excel" &&
-                          Boolean(
-                            reviewFile?.name
-                              .toLowerCase()
-                              .endsWith(".xlsx"),
-                          ))
-                      }
-                      onClick={() => setGenerationMode(mode)}
-                    >
-                      <strong>{title}</strong>
-                      <small>{description}</small>
-                    </button>
-                  ))}
-                </div>
-                <div className="pipeline-row">
-                  <div><span>1</span><strong>载入并清洗</strong><small>文件或公开原帖</small></div>
-                  <i>→</i>
-                  <div><span>2</span><strong>并行启动</strong><small>两条链路互不拖累</small></div>
-                  <i>→</i>
-                  <div className={generatesExcel ? "" : "muted-step"}><span>X</span><strong>Excel 完整整理</strong><small>保留全部复盘信息</small></div>
-                  <i>→</i>
-                  <div className={generatesWord ? "" : "muted-step"}><span>W</span><strong>Word 核心分析</strong><small>只写有地位的个股</small></div>
-                </div>
-                {(generationJob?.branches || analysis?.branches) && (
-                  <div className="branch-status-grid">
-                    {(["excel", "word"] as const).map((name) => {
-                      const branch =
-                        (isAnalyzing
-                          ? generationJob?.branches?.[name]
-                          : analysis?.branches[name]) ??
-                        generationJob?.branches?.[name];
-                      if (!branch) return null;
-                      return (
-                        <div
-                          key={name}
-                          className={`branch-status ${branch.status}`}
-                        >
-                          <span>{name === "excel" ? "X" : "W"}</span>
-                          <div>
-                            <strong>
-                              {name === "excel"
-                                ? "Excel 完整整理"
-                                : "Word 布局分析"}
-                            </strong>
-                            <small>{branch.message}</small>
-                            {branch.status === "failed" && !isAnalyzing && (
-                              <button
-                                type="button"
-                                className="retry-branch"
-                                onClick={() => handleRetry(name)}
-                              >
-                                只重试{name === "excel" ? " Excel" : " Word"}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <button className="primary-run-button" disabled={isAnalyzing} onClick={handleAnalyze}>
-                  <span>{isAnalyzing ? "正在生成并保存结果…" : generationLabel}</span>
-                  <small>
-                    {reviewFile?.name.toLowerCase().endsWith(".xlsx")
-                      ? "输入已是 Excel，本次只新增 Word 分析"
-                      : reviewFile || crawledText
-                        ? generationMode === "both"
-                          ? "一次点击，分别保存两个结果"
-                          : "只调用当前选择的生成链路"
-                        : "需要先载入每日复盘"}
-                  </small>
-                </button>
-                {hasGeneratedFiles && analysis && (
-                  <div className="generated-files">
-                    <div>
-                      <span className="eyebrow">本次输出</span>
-                      <strong>成功结果已独立保存</strong>
-                      <small>其中一条链路失败时，另一条结果不会丢失。</small>
-                    </div>
-                    <div className="generated-file-actions">
-                      <button
-                        disabled={!analysis.excel_filename}
-                        onClick={downloadExcel}
-                      >
-                        下载 Excel
-                      </button>
-                      <button
-                        disabled={!analysis.document_filename}
-                        onClick={downloadDocument}
-                      >
-                        下载 Word
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </section>
-              <section className="today-note-grid">
-                <article><span className="eyebrow">分析主线</span><h3>首板出身决定原始任务</h3><p>先确认从哪里发酵、为谁开路，再判断个股是否完成任务。</p></article>
-                <article><span className="eyebrow">明确禁止</span><h3>不用普通技术分析冲掉布局核心</h3><p>价格、量能和均线只能作为任务是否被确认的证据。</p></article>
-              </section>
-            </>
+            <TodayReviewSection
+              reviewFile={reviewFile}
+              crawledText={crawledText}
+              crawledSource={crawledSource}
+              apiKeyConfigured={apiKeyConfigured}
+              apiKey={apiKey}
+              onApiKeyChange={(value) => {
+                setApiKey(value);
+                setActionMessage("");
+              }}
+              actionMessage={actionMessage}
+              isAnalyzing={isAnalyzing}
+              generationMode={generationMode}
+              onGenerationModeChange={setGenerationMode}
+              generatesExcel={generatesExcel}
+              generatesWord={generatesWord}
+              generationJob={generationJob}
+              analysis={analysis}
+              onRetry={handleRetry}
+              onAnalyze={handleAnalyze}
+              generationLabel={generationLabel}
+              hasGeneratedFiles={hasGeneratedFiles}
+              onDownloadExcel={downloadExcel}
+              onDownloadWord={downloadDocument}
+            />
           )}
 
           {activeNav === "布局分析" && (
-            <>
-              {!hasWordAnalysis && (
-                <div className="page-empty">
-                  <span className="empty-symbol">未</span>
-                  <h3>还没有真实分析结果</h3>
-                  <p>Excel 可能已经生成；Word 布局分析需要模型额度可用后才能显示。</p>
-                  <button onClick={() => setActiveNav("今日复盘")}>前往今日复盘</button>
-                </div>
-              )}
-              {analysis && hasWordAnalysis && (
-                <>
-                  <section className="judgement-card">
-                    <div className="judgement-topline">
-                      <span className="section-number">01</span>
-                      <span className="eyebrow">RAG 核心判断</span>
-                      <span className="confidence">引用 {evidence.length} 条资料</span>
-                    </div>
-                    <div className="judgement-grid">
-                      <div>
-                        <h3>{coreJudgement ? cleanMarkdown(coreJudgement).split("\n")[0] : "本次分析已完成"}</h3>
-                        <p className="analysis-text">{coreJudgement ? cleanMarkdown(coreJudgement) : cleanMarkdown(analysis.analysis)}</p>
-                      </div>
-                      <div className="decision-box">
-                        <span>核心约束</span>
-                        <strong>技术指标只能验证任务，不能替代布局关系</strong>
-                        <small>社区评论仅作补充；与本人原帖冲突时，以可核对的公开原文为准。</small>
-                      </div>
-                    </div>
-                  </section>
-                  <section className="panel relationship-panel">
-                    <div className="panel-heading">
-                      <div><span className="section-number">02</span><div><span className="eyebrow">布局关系</span><h3>本次检索分析</h3></div></div>
-                    </div>
-                    {layoutText && <div className="generated-analysis">{cleanMarkdown(layoutText)}</div>}
-                    <div className="relationship-map" aria-label="个股任务关系框架示意图">
-                      {displayTasks
-                        ? displayTasks.map((task, index) => {
-                            const position = ["seed", "core", "anchor", "follower"][index];
-                            return (
-                              <button key={`${task.stock}-${index}`} className={`map-node ${position} ${selectedId === task.stock ? "selected" : ""}`} onClick={() => setSelectedId(task.stock)}>
-                                <small>{task.current_position || "任务节点"}</small>
-                                <strong>{task.stock}</strong>
-                                <span>{task.original_task}</span>
-                              </button>
-                            );
-                          })
-                        : frameworkTasks.map((task) => (
-                            <button key={task.id} className={`map-node ${task.id} ${selectedId === task.id ? "selected" : ""}`} onClick={() => setSelectedId(task.id)}>
-                              <small>{task.role.slice(0, 2)}</small><strong>{task.name}</strong><span>{task.position}</span>
-                            </button>
-                          ))}
-                      <div className="relation-line line-a"><span>带动</span></div><div className="relation-line line-b"><span>反馈</span></div><div className="relation-line line-c"><span>验证</span></div>
-                      <div className="map-center"><span>市场合力</span><strong>任务迁移</strong></div>
-                    </div>
-                  </section>
-                  <section className="panel matrix-panel">
-                    <div className="panel-heading"><div><span className="section-number">03</span><div><span className="eyebrow">个股任务</span><h3>模型提取的任务表</h3></div></div></div>
-                    {analysis.tasks?.length ? (
-                      <div className="task-table-wrap">
-                        <table className="task-table analysis-task-table">
-                          <thead><tr><th>个股</th><th>首板出身</th><th>原始任务</th><th>当前地位</th><th>协同 / 压制</th><th>完成信号</th><th>失败信号</th></tr></thead>
-                          <tbody>
-                            {analysis.tasks.map((task, index) => (
-                              <tr key={`${task.stock}-${index}`} className={selectedId === task.stock ? "selected-row" : ""} onClick={() => setSelectedId(task.stock)}>
-                                <td><strong>{task.stock}</strong></td><td>{task.origin}</td><td>{task.original_task}</td><td>{task.current_position}</td><td>{task.relations}</td><td>{task.success_signal}</td><td>{task.failure_signal}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <div className="task-output">{taskText ? cleanMarkdown(taskText) : "本次模型没有按指定格式输出任务表，请以完整分析和证据链为准。"}</div>
-                    )}
-                  </section>
-                  <section className="tomorrow-grid">
-                    <article><span className="eyebrow">明日竞价确认</span><h3>完成任务需要出现什么</h3><p className="analysis-text">{tomorrowText ? cleanMarkdown(tomorrowText) : "资料不足"}</p></article>
-                    <article className="failure-card"><span className="eyebrow">失效条件</span><h3>什么时候必须推翻当前判断</h3><p className="analysis-text">{failureText ? cleanMarkdown(failureText) : "资料不足"}</p></article>
-                  </section>
-                </>
-              )}
-            </>
+            <AnalysisSection
+              analysis={analysis}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onGoToToday={() => setActiveNav("今日复盘")}
+            />
           )}
 
           {activeNav === "知识库" && (
-            <>
-              <section className="knowledge-hero">
-                <div><span className="eyebrow">本机 RAG 状态</span><h3>{stats.chunks.toLocaleString()} 条证据已建立检索索引</h3><p>更新会自动完成发现、抓取、去重、清洗、分段和索引重建。</p></div>
-                <button disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>{syncJob?.status === "running" ? "正在更新…" : "更新知识库（爬取并清洗）"}</button>
-              </section>
-              {syncJob && (syncJob.status === "pending" || syncJob.status === "running") && (
-                <div className="sync-progress"><div style={{ width: `${Math.round((syncJob.current / Math.max(syncJob.total, 1)) * 100)}%` }} /><span>{syncJob.message}</span></div>
-              )}
-              <section className="stat-grid">
-                <article><span>核心原帖</span><strong>{stats.core_posts}</strong><small>近一年高阅读量前 20</small></article>
-                <article><span>近期补充帖</span><strong>{stats.supplemental_posts}</strong><small>补充公开问答语境</small></article>
-                <article><span>本人回复</span><strong>{stats.qa_pairs.toLocaleString()}</strong><small>作者原始语境优先</small></article>
-                <article><span>社区精选</span><strong>{stats.community_comments}</strong><small>只作共识与疑问补充</small></article>
-                <article><span>人工体系切片</span><strong>{stats.manual_chunks}</strong><small>本地整理文档</small></article>
-                <article><span>最近同步</span><strong className="date-stat">{stats.last_sync.slice(0, 10)}</strong><small>{stats.last_sync.replace("T", " ")}</small></article>
-              </section>
-              <section className="panel cleaning-panel">
-                <span className="eyebrow">清洗规则</span>
-                <h3>什么会保留，什么会被降权</h3>
-                <div className="cleaning-columns">
-                  <div><strong>保留</strong><p>完整正文、本人有效回复、问题上下文、高赞且有布局信息的评论、人工体系文档。</p></div>
-                  <div><strong>降权或过滤</strong><p>重复文本、空话、广告、过短回复、脱离布局语境的泛泛评论以及网页噪声。</p></div>
-                </div>
-              </section>
-              <section className="panel source-library-panel">
-                <div className="panel-heading">
-                  <div><span className="section-number">02</span><div><span className="eyebrow">采集明细</span><h3>已进入知识库的公开帖子</h3></div></div>
-                  <span className="hint">{knowledgePosts.length} 篇</span>
-                </div>
-                <div className="source-table-wrap">
-                  <table className="source-table">
-                    <thead><tr><th>标题</th><th>日期</th><th>浏览</th><th>评论</th><th>点赞</th><th>用途</th><th>正文</th></tr></thead>
-                    <tbody>
-                      {knowledgePosts.map((post) => (
-                        <tr key={post.url}>
-                          <td><a href={post.url} target="_blank" rel="noreferrer">{post.title}</a></td>
-                          <td>{post.published_at}</td><td>{post.views.toLocaleString()}</td><td>{post.reply_count.toLocaleString()}</td><td>{post.likes.toLocaleString()}</td>
-                          <td>{post.scope === "top_year" ? "高阅读量核心" : "近期问答补充"}</td>
-                          <td><span className={post.body_truncated ? "source-badge warning" : "source-badge"}>{post.body_truncated ? "公开节选" : "完整"}</span></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            </>
+            <KnowledgeSection
+              stats={stats}
+              syncJob={syncJob}
+              posts={knowledgePosts}
+              onSync={handleSync}
+            />
           )}
 
           {activeNav === "历史文档" && (
-            <section className="history-panel">
-              <div className="history-heading"><div><span className="eyebrow">本机保存</span><h3>已生成的 Excel 与 Word</h3></div><span>{documents.length} 份</span></div>
-              {documents.length ? (
-                <div className="document-list">
-                  {documents.map((item) => (
-                    <article key={item.filename}>
-                      <div className={`doc-icon ${item.kind}`}>{item.kind === "excel" ? "X" : "W"}</div>
-                      <div><strong>{item.filename}</strong><small>{item.modified_at.replace("T", " ")} · {Math.max(1, Math.round(item.size / 1024))} KB</small></div>
-                      <button onClick={() => downloadHistoryDocument(item.filename)}>下载</button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="page-empty compact"><h3>还没有生成文件</h3><p>每次运行后，成功生成的 Excel 和 Word 都会独立保存到这里。</p><button onClick={() => setActiveNav("今日复盘")}>开始第一次生成</button></div>
-              )}
-            </section>
+            <HistoryDocumentsSection
+              documents={documents}
+              onDownload={downloadHistoryDocument}
+              onGoToToday={() => setActiveNav("今日复盘")}
+            />
           )}
         </section>
 

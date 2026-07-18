@@ -4,25 +4,31 @@ import test from "node:test";
 
 const html = await readFile("app/page.tsx", "utf8");
 const apiClient = await readFile("app/lib/review-api.ts", "utf8");
-const appSource = `${html}\n${apiClient}`;
+const components = await Promise.all([
+  "TodayReviewSection.tsx",
+  "AnalysisSection.tsx",
+  "KnowledgeSection.tsx",
+  "HistoryDocumentsSection.tsx",
+].map((name) => readFile(`app/components/${name}`, "utf8")));
+const appSource = [html, apiClient, ...components].join("\n");
 const errorPage = await readFile("app/error.tsx", "utf8");
 const globalErrorPage = await readFile("app/global-error.tsx", "utf8");
 
 test("页面包含产品核心信息", () => {
-  assert.match(html, /复盘驾驶舱/);
-  assert.match(html, /首板出身/);
-  assert.match(html, /RAG 证据链/);
-  assert.match(html, /今日复盘/);
-  assert.match(html, /布局分析/);
-  assert.match(html, /知识库/);
-  assert.match(html, /历史文档/);
-  assert.match(html, /自爬取当日复盘/);
-  assert.match(html, /生成 Excel \+ Word/);
-  assert.match(html, /Excel 完整整理/);
-  assert.match(html, /Word 核心分析/);
-  assert.match(html, /只生成 Excel/);
-  assert.match(html, /只生成 Word/);
-  assert.match(html, /只重试/);
+  assert.match(appSource, /复盘驾驶舱/);
+  assert.match(appSource, /首板出身/);
+  assert.match(appSource, /RAG 证据链/);
+  assert.match(appSource, /今日复盘/);
+  assert.match(appSource, /布局分析/);
+  assert.match(appSource, /知识库/);
+  assert.match(appSource, /历史文档/);
+  assert.match(appSource, /自爬取当日复盘/);
+  assert.match(appSource, /生成 Excel \+ Word/);
+  assert.match(appSource, /Excel 完整整理/);
+  assert.match(appSource, /Word 核心分析/);
+  assert.match(appSource, /只生成 Excel/);
+  assert.match(appSource, /只生成 Word/);
+  assert.match(appSource, /只重试/);
 });
 
 test("页面不再包含脚手架预览", () => {
