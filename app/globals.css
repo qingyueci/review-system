@@ -191,6 +191,21 @@ button { color: inherit; }
   border-left: 3px solid var(--red); font-size: 10px; line-height: 1.6;
 }
 .action-message.working { color: #76571f; background: rgba(200,138,40,.1); border-left-color: var(--amber); }
+.generation-mode {
+  margin-top: 12px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px;
+}
+.generation-mode button {
+  min-height: 54px; padding: 9px 10px; color: var(--ink-soft); background: #f7f4ed;
+  border: 1px solid #e0dbd1; border-radius: 5px; text-align: left; cursor: pointer;
+}
+.generation-mode button.active {
+  color: #4b3818; background: var(--amber-soft); border-color: var(--amber);
+  box-shadow: inset 0 0 0 1px rgba(200,138,40,.16);
+}
+.generation-mode button:disabled { opacity: .45; cursor: not-allowed; }
+.generation-mode strong, .generation-mode small { display: block; }
+.generation-mode strong { font-size: 10px; }
+.generation-mode small { margin-top: 4px; color: var(--muted); font-size: 8px; }
 .pipeline-row {
   margin-top: 18px; padding: 16px; display: flex; align-items: center; justify-content: space-between;
   gap: 10px; background: #f7f4ed; border: 1px solid #e0dbd1; border-radius: 6px;
@@ -203,6 +218,7 @@ button { color: inherit; }
 .pipeline-row strong { margin-top: 4px; font-size: 11px; }
 .pipeline-row small { color: var(--muted); font-size: 9px; }
 .pipeline-row > i { color: #aaa399; font-style: normal; }
+.pipeline-row .muted-step { opacity: .35; }
 .branch-status-grid {
   margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
 }
@@ -218,6 +234,11 @@ button { color: inherit; }
 .branch-status strong, .branch-status small { display: block; }
 .branch-status strong { font-size: 10px; }
 .branch-status small { margin-top: 3px; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.retry-branch {
+  margin-top: 6px; padding: 4px 7px; color: #8b3934; background: rgba(180,80,73,.08);
+  border: 1px solid rgba(180,80,73,.24); border-radius: 4px; font-size: 8px;
+  font-weight: 800; cursor: pointer;
+}
 .branch-status.running { border-left-color: var(--amber); }
 .branch-status.running > span { color: #2e2517; background: var(--amber); }
 .branch-status.succeeded { border-left-color: var(--green); }
@@ -566,6 +587,7 @@ button { color: inherit; }
   .pipeline-row > div { grid-template-columns: 24px 1fr; }
   .pipeline-row > div span { grid-row: 1 / 3; }
   .branch-status-grid { grid-template-columns: 1fr; }
+  .generation-mode { grid-template-columns: 1fr; }
   .generated-files { align-items: stretch; flex-direction: column; }
   .generated-file-actions button { flex: 1; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }

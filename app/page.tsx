@@ -52,6 +52,8 @@ type BranchState = {
   message: string;
 };
 
+type GenerationMode = "both" | "excel" | "word";
+
 type AnalysisTask = {
   stock: string;
   origin: string;
@@ -70,6 +72,12 @@ type Job<T = unknown> = {
   branches?: Record<"excel" | "word", BranchState>;
   stats?: Stats;
   result?: T;
+};
+
+type PersistedJob<T = unknown> = Job<T> & {
+  job_id: string;
+  created_at: string;
+  updated_at: string;
 };
 
 type FetchReviewResult = {
@@ -254,6 +262,39 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
   };
 }
 
+function mergeAnalysisResults(
+  previous: AnalysisResult,
+  incoming: AnalysisResult,
+): AnalysisResult {
+  const keepPreviousBranch = (name: "excel" | "word") =>
+    incoming.branches[name].status === "skipped" &&
+    previous.branches[name].status === "succeeded";
+  return {
+    analysis: incoming.analysis || previous.analysis,
+    sections:
+      Object.keys(incoming.sections).length > 0
+        ? incoming.sections
+        : previous.sections,
+    tasks: incoming.tasks.length ? incoming.tasks : previous.tasks,
+    sources: incoming.sources.length ? incoming.sources : previous.sources,
+    document_base64:
+      incoming.document_base64 || previous.document_base64,
+    document_filename:
+      incoming.document_filename || previous.document_filename,
+    excel_base64: incoming.excel_base64 || previous.excel_base64,
+    excel_filename: incoming.excel_filename || previous.excel_filename,
+    branches: {
+      excel: keepPreviousBranch("excel")
+        ? previous.branches.excel
+        : incoming.branches.excel,
+      word: keepPreviousBranch("word")
+        ? previous.branches.word
+        : incoming.branches.word,
+    },
+    warnings: incoming.warnings,
+  };
+}
+
 async function requestLocal<T>(
   token: string,
   path: string,
@@ -345,6 +386,8 @@ export default function Home() {
   const [stats, setStats] = useState<Stats>(emptyStats);
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [apiKey, setApiKey] = useState("");
+  const [generationMode, setGenerationMode] =
+    useState<GenerationMode>("both");
   const [reviewDate, setReviewDate] = useState(todayText);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
   const [crawledText, setCrawledText] = useState("");
@@ -353,12 +396,21 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [generationJob, setGenerationJob] = useState<Job<AnalysisResult> | null>(null);
+  const [resultJobId, setResultJobId] = useState("");
   const [syncJob, setSyncJob] = useState<Job | null>(null);
   const [notice, setNotice] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [documents, setDocuments] = useState<HistoryDocument[]>([]);
   const [knowledgePosts, setKnowledgePosts] = useState<KnowledgePost[]>([]);
 
+  const generatesExcel = generationMode !== "word";
+  const generatesWord = generationMode !== "excel";
+  const generationLabel =
+    generationMode === "both"
+      ? "生成 Excel + Word"
+      : generationMode === "excel"
+        ? "只生成 Excel"
+        : "只生成 Word";
   const hasWordAnalysis = Boolean(analysis?.analysis.trim());
   const hasGeneratedFiles = Boolean(
     analysis?.document_filename || analysis?.excel_filename,
@@ -423,34 +475,78 @@ export default function Home() {
 
   useEffect(() => {
     if (!connected || !token) return;
-    const jobId = window.sessionStorage.getItem("review-active-generation");
-    if (!jobId) return;
     let cancelled = false;
-    setIsAnalyzing(true);
-    setActionMessage("检测到未结束的生成任务，正在恢复进度……");
-    waitForJob<AnalysisResult>(token, jobId, (job) => {
-      if (!cancelled) {
-        setGenerationJob(job);
-        setActionMessage(
-          `${job.message}${job.total > 1 ? `（${job.current}/${job.total}）` : ""}`,
-        );
+    async function restoreGeneration() {
+      let jobId = window.localStorage.getItem(
+        "review-active-generation",
+      );
+      let job: Job<AnalysisResult> | null = null;
+      try {
+        if (jobId) {
+          job = await requestLocal<Job<AnalysisResult>>(
+            token,
+            `/api/jobs/${jobId}`,
+          );
+        } else {
+          const recent = await requestLocal<{
+            jobs: PersistedJob<AnalysisResult>[];
+          }>(token, "/api/jobs/recent?limit=1");
+          const latest = recent.jobs[0];
+          if (latest) {
+            jobId = latest.job_id;
+            job = latest;
+          }
+        }
+      } catch {
+        window.localStorage.removeItem("review-active-generation");
+        return;
       }
-    })
-      .then(async (job) => {
-        if (cancelled || !job.result) return;
-        await applyGenerationResult(job.result, true);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        const message =
-          error instanceof Error ? error.message : "未能恢复上次生成任务";
-        setActionMessage(message);
-        showNotice(message);
-      })
-      .finally(() => {
-        window.sessionStorage.removeItem("review-active-generation");
+      if (cancelled || !job || !jobId) return;
+      setResultJobId(jobId);
+      setGenerationJob(job);
+      if (job.status === "succeeded" || job.status === "failed") {
+        window.localStorage.removeItem("review-active-generation");
+        if (job.result) setAnalysis(normalizeAnalysisResult(job.result));
+        if (job.status === "failed") setActionMessage(job.message);
+        return;
+      }
+
+      setIsAnalyzing(true);
+      setActionMessage("检测到未结束的生成任务，正在恢复进度……");
+      try {
+        const completed = await waitForJob<AnalysisResult>(
+          token,
+          jobId,
+          (current) => {
+            if (!cancelled) {
+              setGenerationJob(current);
+              setActionMessage(
+                `${current.message}${
+                  current.total > 1
+                    ? `（${current.current}/${current.total}）`
+                    : ""
+                }`,
+              );
+            }
+          },
+        );
+        if (!cancelled && completed.result) {
+          setGenerationJob(completed);
+          await applyGenerationResult(completed.result, true);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message =
+            error instanceof Error ? error.message : "未能恢复上次生成任务";
+          setActionMessage(message);
+          showNotice(message);
+        }
+      } finally {
+        window.localStorage.removeItem("review-active-generation");
         if (!cancelled) setIsAnalyzing(false);
-      });
+      }
+    }
+    void restoreGeneration();
     return () => {
       cancelled = true;
     };
@@ -464,8 +560,13 @@ export default function Home() {
   async function applyGenerationResult(
     value: AnalysisResult,
     recovered = false,
+    mergePrevious = false,
   ) {
-    const result = normalizeAnalysisResult(value);
+    const incoming = normalizeAnalysisResult(value);
+    const result =
+      mergePrevious && analysis
+        ? mergeAnalysisResults(analysis, incoming)
+        : incoming;
     setAnalysis(result);
     try {
       const history = await requestLocal<{ documents: HistoryDocument[] }>(
@@ -511,8 +612,16 @@ export default function Home() {
       setCrawledText("");
       setCrawledSource("");
       setActionMessage("");
+      if (
+        file.name.toLowerCase().endsWith(".xlsx") &&
+        generationMode === "excel"
+      ) {
+        setGenerationMode("word");
+        showNotice("导入内容已经是 Excel，已切换为只生成 Word。");
+        return;
+      }
       showNotice(
-        `已选择「${file.name}」，点击“生成 Excel + Word”即可。`,
+        `已选择「${file.name}」，点击“${generationLabel}”即可。`,
       );
     }
   }
@@ -574,7 +683,7 @@ export default function Home() {
     }
     setIsAnalyzing(true);
     setGenerationJob(null);
-    setActionMessage("正在启动 Excel 整理与 Word 布局分析……");
+    setActionMessage(`正在启动：${generationLabel}……`);
     try {
       const contentBase64 = reviewFile ? await fileToBase64(reviewFile) : "";
       const started = await requestLocal<{ job_id: string; status: string }>(
@@ -588,12 +697,13 @@ export default function Home() {
             text: crawledText,
             review_date: reviewDate,
             api_key: apiKey,
-            generate_excel: true,
-            generate_word: true,
+            generate_excel: generatesExcel,
+            generate_word: generatesWord,
           }),
         },
       );
-      window.sessionStorage.setItem(
+      setResultJobId(started.job_id);
+      window.localStorage.setItem(
         "review-active-generation",
         started.job_id,
       );
@@ -617,7 +727,63 @@ export default function Home() {
       setActionMessage(message);
       showNotice(message);
     } finally {
-      window.sessionStorage.removeItem("review-active-generation");
+      window.localStorage.removeItem("review-active-generation");
+      setIsAnalyzing(false);
+    }
+  }
+
+  async function handleRetry(branch: "excel" | "word") {
+    if (!requireConnection()) return;
+    if (!resultJobId) {
+      showNotice("没有找到可重试的任务记录，请重新生成。");
+      return;
+    }
+    if (!apiKeyConfigured && !apiKey.trim()) {
+      const message = "缺少 Kimi Code API Key，无法重试失败项。";
+      setActionMessage(message);
+      showNotice(message);
+      return;
+    }
+    const label = branch === "excel" ? "Excel" : "Word";
+    setIsAnalyzing(true);
+    setActionMessage(`正在单独重试 ${label}……`);
+    try {
+      const started = await requestLocal<{
+        job_id: string;
+        status: string;
+      }>(token, `/api/jobs/${resultJobId}/retry`, {
+        method: "POST",
+        body: JSON.stringify({ branch, api_key: apiKey }),
+      });
+      setResultJobId(started.job_id);
+      window.localStorage.setItem(
+        "review-active-generation",
+        started.job_id,
+      );
+      const completed = await waitForJob<AnalysisResult>(
+        token,
+        started.job_id,
+        (job) => {
+          setGenerationJob(job);
+          setActionMessage(
+            `${job.message}${
+              job.total > 1 ? `（${job.current}/${job.total}）` : ""
+            }`,
+          );
+        },
+      );
+      if (!completed.result) {
+        throw new Error(`${label} 重试结束，但没有返回结果`);
+      }
+      setGenerationJob(completed);
+      await applyGenerationResult(completed.result, false, true);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : `${label} 重试失败`;
+      setActionMessage(message);
+      showNotice(message);
+    } finally {
+      window.localStorage.removeItem("review-active-generation");
       setIsAnalyzing(false);
     }
   }
@@ -716,7 +882,7 @@ export default function Home() {
             {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "更新知识库"}
           </button>
           <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
-            {isAnalyzing ? "正在并行生成…" : "生成 Excel + Word"}
+            {isAnalyzing ? "正在生成…" : generationLabel}
           </button>
         </div>
       </header>
@@ -787,21 +953,51 @@ export default function Home() {
                   {apiKeyConfigured && <span className="key-ready">本机已配置模型密钥</span>}
                 </div>
                 {actionMessage && <div className={`action-message ${isAnalyzing ? "working" : ""}`}>{actionMessage}</div>}
+                <div className="generation-mode" role="radiogroup" aria-label="生成内容">
+                  {([
+                    ["both", "同时生成", "完整 Excel + 核心 Word"],
+                    ["excel", "只生成 Excel", "完整整理，不新增观点"],
+                    ["word", "只生成 Word", "只分析核心任务"],
+                  ] as const).map(([mode, title, description]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={generationMode === mode}
+                      className={generationMode === mode ? "active" : ""}
+                      disabled={
+                        isAnalyzing ||
+                        (mode === "excel" &&
+                          Boolean(
+                            reviewFile?.name
+                              .toLowerCase()
+                              .endsWith(".xlsx"),
+                          ))
+                      }
+                      onClick={() => setGenerationMode(mode)}
+                    >
+                      <strong>{title}</strong>
+                      <small>{description}</small>
+                    </button>
+                  ))}
+                </div>
                 <div className="pipeline-row">
                   <div><span>1</span><strong>载入并清洗</strong><small>文件或公开原帖</small></div>
                   <i>→</i>
                   <div><span>2</span><strong>并行启动</strong><small>两条链路互不拖累</small></div>
                   <i>→</i>
-                  <div><span>X</span><strong>Excel 完整整理</strong><small>保留全部复盘信息</small></div>
+                  <div className={generatesExcel ? "" : "muted-step"}><span>X</span><strong>Excel 完整整理</strong><small>保留全部复盘信息</small></div>
                   <i>→</i>
-                  <div><span>W</span><strong>Word 核心分析</strong><small>只写有地位的个股</small></div>
+                  <div className={generatesWord ? "" : "muted-step"}><span>W</span><strong>Word 核心分析</strong><small>只写有地位的个股</small></div>
                 </div>
                 {(generationJob?.branches || analysis?.branches) && (
                   <div className="branch-status-grid">
                     {(["excel", "word"] as const).map((name) => {
                       const branch =
-                        generationJob?.branches?.[name] ??
-                        analysis?.branches[name];
+                        (isAnalyzing
+                          ? generationJob?.branches?.[name]
+                          : analysis?.branches[name]) ??
+                        generationJob?.branches?.[name];
                       if (!branch) return null;
                       return (
                         <div
@@ -816,6 +1012,15 @@ export default function Home() {
                                 : "Word 布局分析"}
                             </strong>
                             <small>{branch.message}</small>
+                            {branch.status === "failed" && !isAnalyzing && (
+                              <button
+                                type="button"
+                                className="retry-branch"
+                                onClick={() => handleRetry(name)}
+                              >
+                                只重试{name === "excel" ? " Excel" : " Word"}
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
@@ -823,12 +1028,14 @@ export default function Home() {
                   </div>
                 )}
                 <button className="primary-run-button" disabled={isAnalyzing} onClick={handleAnalyze}>
-                  <span>{isAnalyzing ? "Excel 与 Word 正在并行生成…" : "生成 Excel + Word"}</span>
+                  <span>{isAnalyzing ? "正在生成并保存结果…" : generationLabel}</span>
                   <small>
                     {reviewFile?.name.toLowerCase().endsWith(".xlsx")
                       ? "输入已是 Excel，本次只新增 Word 分析"
                       : reviewFile || crawledText
-                        ? "一次点击，分别保存两个结果"
+                        ? generationMode === "both"
+                          ? "一次点击，分别保存两个结果"
+                          : "只调用当前选择的生成链路"
                         : "需要先载入每日复盘"}
                   </small>
                 </button>
