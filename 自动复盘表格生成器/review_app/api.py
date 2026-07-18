@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import secrets
-from threading import Lock, Thread
+from threading import Thread
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -17,17 +15,17 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .analysis import analyze_with_rag
 from .analysis_parser import parse_analysis_sections, parse_task_table
+from .artifact_store import list_artifacts, resolve_artifact
 from .config import DATA_DIR, PROJECT_DIR
 from .crawler import TgbCrawler
-from .docx_export import generate_analysis_docx
-from .excel import generate_excel
+from .generation_service import generate_review_outputs
 from .job_store import JobStore
 from .knowledge import KnowledgeStore, sync_top_year
 from .llm import parse_with_kimi
 from .preprocessing import preprocess_text
 from .review_input import extract_review_text
 from .schemas import AnalyzeRequest, FetchReviewRequest, RetryGenerationRequest
-from .validation import validate_data
+from .task_manager import TaskManager
 
 
 SITE_URL = os.getenv(
@@ -52,60 +50,12 @@ def get_service_token() -> str:
 
 
 SERVICE_TOKEN = get_service_token()
-jobs: dict[str, dict[str, Any]] = {}
-jobs_lock = Lock()
 JOB_STORE = JobStore()
 JOB_STORE.mark_interrupted()
-
-
-def _register_job(
-    job_id: str,
-    job: dict[str, Any],
-    request_payload: dict[str, Any] | None = None,
-) -> str:
-    with jobs_lock:
-        fingerprint = job.get("request_fingerprint")
-        if fingerprint:
-            for existing_id, existing in jobs.items():
-                if (
-                    existing.get("kind") == "analysis"
-                    and existing.get("status") in {"pending", "running"}
-                    and existing.get("request_fingerprint") == fingerprint
-                ):
-                    return existing_id
-        jobs[job_id] = dict(job)
-        snapshot = dict(jobs[job_id])
-    if job.get("kind") == "analysis":
-        JOB_STORE.save(job_id, snapshot, request_payload)
-        JOB_STORE.prune()
-    return job_id
-
-
-def _update_job(job_id: str, **updates: Any) -> dict[str, Any]:
-    with jobs_lock:
-        if job_id not in jobs:
-            stored = JOB_STORE.get(job_id)
-            if not stored:
-                raise KeyError(job_id)
-            jobs[job_id] = stored
-        jobs[job_id].update(updates)
-        snapshot = dict(jobs[job_id])
-    if snapshot.get("kind") == "analysis":
-        JOB_STORE.save(job_id, snapshot)
-    return snapshot
-
-
-def _job_snapshot(job_id: str) -> dict[str, Any] | None:
-    with jobs_lock:
-        current = jobs.get(job_id)
-        if current:
-            return dict(current)
-    stored = JOB_STORE.get(job_id)
-    if stored:
-        with jobs_lock:
-            jobs[job_id] = dict(stored)
-        return stored
-    return None
+JOB_MANAGER = TaskManager(JOB_STORE)
+# 兼容现有本机调试和测试入口，实际读写统一由 TaskManager 完成。
+jobs = JOB_MANAGER.jobs
+jobs_lock = JOB_MANAGER.lock
 
 
 def _normalize_analysis_request(payload: AnalyzeRequest) -> AnalyzeRequest:
@@ -177,59 +127,6 @@ def _verify_token(value: str | None) -> None:
         raise HTTPException(status_code=401, detail="请从“启动复盘驾驶舱”打开站点")
 
 
-def _public_source(source: dict) -> dict:
-    labels = {
-        "qa": "刺大本人回复",
-        "post": "历史原帖",
-        "manual": "人工整理体系",
-        "community": "社区精选观点",
-    }
-    return {
-        "level": labels.get(source["source_type"], "公开资料"),
-        "title": source["title"],
-        "published_at": source["published_at"][:10],
-        "source_url": source["source_url"],
-        "excerpt": source["content"][:360],
-        "source_type": source["source_type"],
-    }
-
-
-def _save_artifact(content: bytes, filename: str) -> str:
-    DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
-    stem = re.sub(r'[<>:"/\\|?*]', "_", Path(filename).stem)
-    suffix = Path(filename).suffix.lower()
-    if suffix not in {".docx", ".xlsx"}:
-        raise ValueError("生成文件格式无效")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    saved_name = f"{stem}_{timestamp}{suffix}"
-    (DOCUMENT_DIR / saved_name).write_bytes(content)
-    return saved_name
-
-
-def _list_documents() -> list[dict]:
-    DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted(
-        (
-            path
-            for path in DOCUMENT_DIR.iterdir()
-            if path.is_file() and path.suffix.lower() in {".docx", ".xlsx"}
-        ),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    return [
-        {
-            "filename": path.name,
-            "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(
-                timespec="seconds"
-            ),
-            "size": path.stat().st_size,
-            "kind": "word" if path.suffix.lower() == ".docx" else "excel",
-        }
-        for path in files[:50]
-    ]
-
-
 @app.get("/api/status")
 def status(x_review_token: str | None = Header(default=None)) -> dict:
     _verify_token(x_review_token)
@@ -267,162 +164,15 @@ def _fetch_review_result(review_date: str) -> dict:
     }
 
 
-def _generate_excel_artifact(
-    api_key: str,
-    review_text: str,
-    review_date: str,
-) -> dict:
-    """沿用原 Excel 解析与排版链路，不改变既有工作簿格式。"""
-    data = validate_data(parse_with_kimi(api_key, review_text))
-    if review_date:
-        data["meta"]["date"] = review_date
-    content, filename = generate_excel(data)
-    saved_filename = _save_artifact(content, filename)
-    return {
-        "excel_base64": "",
-        "excel_filename": saved_filename,
-    }
-
-
-def _generate_word_artifact(
-    api_key: str,
-    review_text: str,
-    sources: list[dict],
-    review_date: str,
-) -> dict:
-    analysis = analyze_with_rag(api_key, review_text, sources)
-    document, filename = generate_analysis_docx(
-        analysis,
-        sources,
-        review_date=review_date or date.today().isoformat(),
-    )
-    saved_filename = _save_artifact(document, filename)
-    return {
-        "analysis": analysis,
-        "sections": parse_analysis_sections(analysis),
-        "tasks": parse_task_table(analysis),
-        "document_base64": "",
-        "document_filename": saved_filename,
-    }
-
-
 def _analysis_result(payload: AnalyzeRequest, progress=None, branch_update=None) -> dict:
-    if not payload.generate_excel and not payload.generate_word:
-        raise ValueError("至少选择生成 Excel 或 Word 中的一项")
-
-    review_text = preprocess_text(extract_review_text(payload))
-    api_key = payload.api_key.strip() or os.getenv("KIMI_API_KEY", "").strip()
-    sources: list[dict] = []
-    if payload.generate_word:
-        with KnowledgeStore() as store:
-            sources = store.search(review_text, limit=12)
-
-    runners: dict[str, Any] = {}
-    branches = {
-        "excel": {
-            "status": "pending" if payload.generate_excel else "skipped",
-            "message": "等待整理完整复盘" if payload.generate_excel else "本次未选择 Excel",
-        },
-        "word": {
-            "status": "pending" if payload.generate_word else "skipped",
-            "message": "等待生成核心布局分析" if payload.generate_word else "本次未选择 Word",
-        },
-    }
-
-    is_excel_input = (
-        payload.input_is_excel
-        or (
-            Path(payload.filename).suffix.lower() == ".xlsx"
-            and bool(payload.content_base64)
-        )
+    return generate_review_outputs(
+        payload,
+        document_dir=DOCUMENT_DIR,
+        parse_excel=parse_with_kimi,
+        analyze_word=analyze_with_rag,
+        progress=progress,
+        branch_update=branch_update,
     )
-    if payload.generate_excel and is_excel_input:
-        branches["excel"] = {
-            "status": "skipped",
-            "message": "导入内容已经是 Excel，本次保留原文件并只生成 Word",
-        }
-    elif payload.generate_excel:
-        runners["excel"] = lambda: _generate_excel_artifact(
-            api_key,
-            review_text,
-            payload.review_date,
-        )
-    if payload.generate_word:
-        runners["word"] = lambda: _generate_word_artifact(
-            api_key,
-            review_text,
-            sources,
-            payload.review_date,
-        )
-
-    total = max(1, len(runners) + 1)
-    if progress:
-        progress("每日复盘已清洗，正在启动并行生成", 1, total)
-
-    result = {
-        "analysis": "",
-        "sections": {},
-        "tasks": [],
-        "sources": [_public_source(source) for source in sources],
-        "document_base64": "",
-        "document_filename": "",
-        "excel_base64": "",
-        "excel_filename": "",
-        "branches": branches,
-        "warnings": [],
-    }
-    if not runners:
-        return result
-
-    labels = {"excel": "Excel 整理", "word": "Word 布局分析"}
-
-    def run_branch(name: str, runner):
-        branches[name] = {
-            "status": "running",
-            "message": f"正在执行{labels[name]}",
-        }
-        if branch_update:
-            branch_update(name, branches[name])
-        return runner()
-
-    completed_count = 0
-    with ThreadPoolExecutor(max_workers=len(runners)) as executor:
-        futures = {
-            executor.submit(run_branch, name, runner): name
-            for name, runner in runners.items()
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            completed_count += 1
-            try:
-                branch_result = future.result()
-                result.update(branch_result)
-                branches[name] = {
-                    "status": "succeeded",
-                    "message": f"{labels[name]}已生成并保存",
-                }
-            except Exception as exc:
-                message = str(exc) or f"{labels[name]}生成失败"
-                branches[name] = {"status": "failed", "message": message}
-                result["warnings"].append(f"{labels[name]}失败：{message}")
-            if branch_update:
-                branch_update(name, branches[name])
-            if progress:
-                progress(
-                    f"{labels[name]}{('已完成' if branches[name]['status'] == 'succeeded' else '未完成')}",
-                    completed_count + 1,
-                    total,
-                )
-
-    result["branches"] = branches
-    succeeded = [
-        name for name, state in branches.items() if state["status"] == "succeeded"
-    ]
-    if not succeeded and not any(
-        state["status"] == "skipped" for state in branches.values()
-    ):
-        raise RuntimeError("；".join(result["warnings"]) or "本次生成没有成功输出")
-    return result
 
 
 @app.post("/api/analyze")
@@ -463,7 +213,7 @@ def list_posts(x_review_token: str | None = Header(default=None)) -> dict:
 @app.get("/api/documents")
 def list_documents(x_review_token: str | None = Header(default=None)) -> dict:
     _verify_token(x_review_token)
-    return {"documents": _list_documents()}
+    return {"documents": list_artifacts(DOCUMENT_DIR)}
 
 
 @app.get("/api/documents/{filename}")
@@ -472,80 +222,69 @@ def download_document(
     x_review_token: str | None = Header(default=None),
 ):
     _verify_token(x_review_token)
-    safe_name = Path(filename).name
-    suffix = Path(safe_name).suffix.lower()
-    if safe_name != filename or suffix not in {".docx", ".xlsx"}:
-        raise HTTPException(status_code=400, detail="文档名称无效")
-    target = DOCUMENT_DIR / safe_name
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="没有找到这个历史文档")
-    media_type = (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        if suffix == ".docx"
-        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    try:
+        target, media_type = resolve_artifact(DOCUMENT_DIR, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(
         path=target,
-        filename=safe_name,
+        filename=target.name,
         media_type=media_type,
     )
 
 
 def _run_sync(job_id: str) -> None:
     def progress(message: str, current: int, total: int) -> None:
-        with jobs_lock:
-            jobs[job_id].update(
-                status="running",
-                message=message,
-                current=current,
-                total=total,
-            )
+        JOB_MANAGER.update(
+            job_id,
+            status="running",
+            message=message,
+            current=current,
+            total=total,
+        )
 
     try:
         result = sync_top_year(progress)
         with KnowledgeStore() as store:
             stats = store.stats()
-        with jobs_lock:
-            jobs[job_id].update(
-                status="succeeded",
-                message="知识库更新完成",
-                result=result,
-                stats=stats,
-            )
+        JOB_MANAGER.update(
+            job_id,
+            status="succeeded",
+            message="知识库更新完成",
+            result=result,
+            stats=stats,
+        )
     except Exception as exc:
-        with jobs_lock:
-            jobs[job_id].update(
-                status="failed",
-                message=str(exc),
-            )
+        JOB_MANAGER.update(job_id, status="failed", message=str(exc))
 
 
 def _run_fetch_review(job_id: str, review_date: str) -> None:
     try:
-        with jobs_lock:
-            jobs[job_id].update(
-                status="running",
-                message="正在连接公开复盘页面",
-                current=1,
-                total=2,
-            )
+        JOB_MANAGER.update(
+            job_id,
+            status="running",
+            message="正在连接公开复盘页面",
+            current=1,
+            total=2,
+        )
         result = _fetch_review_result(review_date)
-        with jobs_lock:
-            jobs[job_id].update(
-                status="succeeded",
-                message="公开复盘正文已载入",
-                current=2,
-                total=2,
-                result=result,
-            )
+        JOB_MANAGER.update(
+            job_id,
+            status="succeeded",
+            message="公开复盘正文已载入",
+            current=2,
+            total=2,
+            result=result,
+        )
     except Exception as exc:
-        with jobs_lock:
-            jobs[job_id].update(status="failed", message=str(exc))
+        JOB_MANAGER.update(job_id, status="failed", message=str(exc))
 
 
 def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
     def progress(message: str, current: int, total: int) -> None:
-        _update_job(
+        JOB_MANAGER.update(
             job_id,
             status="running",
             message=message,
@@ -554,10 +293,10 @@ def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
         )
 
     def branch_update(name: str, state: dict) -> None:
-        current = _job_snapshot(job_id) or {}
+        current = JOB_MANAGER.snapshot(job_id) or {}
         branches = dict(current.get("branches") or {})
         branches[name] = dict(state)
-        _update_job(job_id, branches=branches)
+        JOB_MANAGER.update(job_id, branches=branches)
 
     try:
         result = _analysis_result(payload, progress, branch_update)
@@ -571,8 +310,8 @@ def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
             message = "Word 已完成；Excel 未生成，可在额度恢复后重试"
         else:
             message = "输入文件已保留，无需重复生成 Excel"
-        current = _job_snapshot(job_id) or {}
-        _update_job(
+        current = JOB_MANAGER.snapshot(job_id) or {}
+        JOB_MANAGER.update(
             job_id,
             status="succeeded",
             message=message,
@@ -580,7 +319,7 @@ def _run_analysis(job_id: str, payload: AnalyzeRequest) -> None:
             result=result,
         )
     except Exception as exc:
-        _update_job(job_id, status="failed", message=str(exc))
+        JOB_MANAGER.update(job_id, status="failed", message=str(exc))
 
 
 @app.post("/api/fetch-review-async")
@@ -590,14 +329,16 @@ def start_fetch_review(
 ) -> dict:
     _verify_token(x_review_token)
     job_id = secrets.token_urlsafe(12)
-    with jobs_lock:
-        jobs[job_id] = {
+    JOB_MANAGER.register(
+        job_id,
+        {
             "kind": "fetch_review",
             "status": "pending",
             "message": "准备自爬取公开复盘",
             "current": 0,
             "total": 2,
-        }
+        },
+    )
     Thread(
         target=_run_fetch_review,
         args=(job_id, payload.review_date),
@@ -662,7 +403,7 @@ def _start_analysis_job(
             },
         },
     }
-    registered_id = _register_job(
+    registered_id = JOB_MANAGER.register(
         job_id,
         job,
         request_payload=_persistable_request(payload),
@@ -684,8 +425,8 @@ def retry_generation(
     x_review_token: str | None = Header(default=None),
 ) -> dict:
     _verify_token(x_review_token)
-    previous = _job_snapshot(job_id)
-    request_payload = JOB_STORE.get_request(job_id)
+    previous = JOB_MANAGER.snapshot(job_id)
+    request_payload = JOB_MANAGER.store.get_request(job_id)
     if not previous or not request_payload:
         raise HTTPException(status_code=404, detail="没有找到可重试的生成任务")
     branch_state = (previous.get("branches") or {}).get(payload.branch) or {}
@@ -706,32 +447,27 @@ def recent_generation_jobs(
     x_review_token: str | None = Header(default=None),
 ) -> dict:
     _verify_token(x_review_token)
-    return {"jobs": JOB_STORE.recent(limit)}
+    return {"jobs": JOB_MANAGER.store.recent(limit)}
 
 
 @app.post("/api/sync")
 def start_sync(x_review_token: str | None = Header(default=None)) -> dict:
     _verify_token(x_review_token)
-    with jobs_lock:
-        running = next(
-            (
-                job_id
-                for job_id, job in jobs.items()
-                if job.get("kind") == "sync"
-                and job["status"] in {"pending", "running"}
-            ),
-            None,
-        )
-        if running:
-            return {"job_id": running, "status": jobs[running]["status"]}
-        job_id = secrets.token_urlsafe(12)
-        jobs[job_id] = {
+    running = JOB_MANAGER.find_running("sync")
+    if running:
+        job_id, job = running
+        return {"job_id": job_id, "status": job["status"]}
+    job_id = secrets.token_urlsafe(12)
+    JOB_MANAGER.register(
+        job_id,
+        {
             "kind": "sync",
             "status": "pending",
             "message": "准备更新知识库",
             "current": 0,
             "total": 1,
-        }
+        },
+    )
     Thread(target=_run_sync, args=(job_id,), daemon=True).start()
     return {"job_id": job_id, "status": "pending"}
 
@@ -742,7 +478,7 @@ def get_job(
     x_review_token: str | None = Header(default=None),
 ) -> dict:
     _verify_token(x_review_token)
-    job = _job_snapshot(job_id)
+    job = JOB_MANAGER.snapshot(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="没有找到这次更新任务")
     return job

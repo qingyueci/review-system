@@ -20,11 +20,9 @@ from review_app.job_store import JobStore
 def isolate_persisted_jobs(monkeypatch, tmp_path) -> None:
     import review_app.api as api_module
 
-    monkeypatch.setattr(
-        api_module,
-        "JOB_STORE",
-        JobStore(tmp_path / "review_jobs.db"),
-    )
+    store = JobStore(tmp_path / "review_jobs.db")
+    monkeypatch.setattr(api_module, "JOB_STORE", store)
+    monkeypatch.setattr(api_module.JOB_MANAGER, "store", store)
     with api_module.jobs_lock:
         api_module.jobs.clear()
 

@@ -86,3 +86,14 @@ API 密钥只从环境变量或密码输入框读取，不写入 Excel、Word �
 5. 生成任务会记录到本机数据库；服务重启后仍能查看最近结果和失败原因。
 
 知识库与 API Key 不会上传到站点。若 `.env` 未配置 `KIMI_API_KEY`，可在驾驶舱中临时填写，密钥只会发送给本机服务。
+
+## 代码结构
+
+- `api.py`：只保留本机接口、权限校验和流程入口。
+- `task_manager.py` / `job_store.py`：任务内存状态与 SQLite 持久化。
+- `artifact_store.py`：Excel、Word 的保存、列表和安全下载。
+- `generation_service.py`：清洗后的复盘并行进入 Excel 与 Word 生成链路。
+- `review_input.py` / `schemas.py`：文件读取与接口请求模型。
+- `analysis_parser.py`：把 Word 分析内容拆成页面可展示的结构。
+
+前端页面也按“今日复盘、布局分析、知识库、历史文档”拆为独立组件，页面入口只负责状态和流程编排。
