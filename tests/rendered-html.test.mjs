@@ -31,6 +31,8 @@ test("页面包含产品核心信息", () => {
   assert.match(appSource, /只重试/);
   assert.match(appSource, /运行记录/);
   assert.match(appSource, /模型消耗/);
+  assert.match(appSource, /增量更新近期 10 篇/);
+  assert.match(appSource, /降级归档/);
 });
 
 test("页面不再包含脚手架预览", () => {

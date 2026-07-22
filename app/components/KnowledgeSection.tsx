@@ -26,13 +26,13 @@ export function KnowledgeSection({
           <span className="eyebrow">本机 RAG 状态</span>
           <h3>{stats.chunks.toLocaleString()} 条证据已建立检索索引</h3>
           <p>
-            更新会自动完成抓取与清洗；分析时使用关键词、本地向量、来源、时间和题材混合排序。
+            核心 20 篇固定保留；日常只增量维护近期 10 篇。移出近期窗口的帖子会降级归档，仍可检索，不会删除。
           </p>
         </div>
         <button disabled={syncing} onClick={onSync}>
           {syncJob?.status === "running"
             ? "正在更新…"
-            : "更新知识库（爬取并清洗）"}
+            : "增量更新近期 10 篇"}
         </button>
       </section>
       {syncJob &&
@@ -52,12 +52,17 @@ export function KnowledgeSection({
         <article>
           <span>核心原帖</span>
           <strong>{stats.core_posts}</strong>
-          <small>近一年高阅读量前 20</small>
+          <small>固定核心库，不参与日常更新</small>
         </article>
         <article>
           <span>近期补充帖</span>
           <strong>{stats.supplemental_posts}</strong>
-          <small>补充公开问答语境</small>
+          <small>滚动维护最新 10 篇</small>
+        </article>
+        <article>
+          <span>历史归档帖</span>
+          <strong>{stats.archived_posts}</strong>
+          <small>保留参考价值，降低检索权重</small>
         </article>
         <article>
           <span>本人回复</span>
@@ -136,8 +141,10 @@ export function KnowledgeSection({
                   <td>{post.likes.toLocaleString()}</td>
                   <td>
                     {post.scope === "top_year"
-                      ? "高阅读量核心"
-                      : "近期问答补充"}
+                      ? "固定高阅读量核心"
+                      : post.scope === "recent_qa"
+                        ? "近期问答补充"
+                        : "历史问答归档"}
                   </td>
                   <td>
                     <span

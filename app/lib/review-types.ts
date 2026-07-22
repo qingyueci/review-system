@@ -3,6 +3,7 @@ import { BranchState } from "./review-api";
 export type Stats = {
   core_posts: number;
   supplemental_posts: number;
+  archived_posts: number;
   qa_pairs: number;
   community_comments: number;
   manual_chunks: number;
@@ -59,7 +60,7 @@ export type KnowledgePost = {
   views: number;
   reply_count: number;
   likes: number;
-  scope: "top_year" | "recent_qa";
+  scope: "top_year" | "recent_qa" | "recent_archive";
   body_truncated: boolean;
   capture_mode: string;
   url: string;

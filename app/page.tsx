@@ -35,6 +35,7 @@ type FetchReviewResult = {
 const emptyStats: Stats = {
   core_posts: 20,
   supplemental_posts: 10,
+  archived_posts: 0,
   qa_pairs: 4306,
   community_comments: 342,
   manual_chunks: 14,
@@ -704,7 +705,7 @@ export default function Home() {
             </div>
           </div>
           <button className="btn btn-secondary" disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>
-            {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "更新知识库"}
+            {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "增量更新"}
           </button>
           <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
             {isAnalyzing ? "正在生成…" : generationLabel}
