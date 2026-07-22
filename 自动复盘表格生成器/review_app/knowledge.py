@@ -27,6 +27,12 @@ SOURCE_WEIGHTS = {
     "manual": 0.82,
     "community": 0.55,
 }
+SCOPE_WEIGHTS = {
+    "top_year": 1.0,
+    "recent_qa": 1.0,
+    "recent_archive": 0.72,
+    "manual": 1.0,
+}
 CONCEPT_TERMS = {
     "首板出身": ("首板", "出身", "发酵来源", "起点"),
     "个股任务": ("任务", "角色", "使命", "负责"),
@@ -225,6 +231,15 @@ class KnowledgeStore:
             (url,),
         ).fetchone()
         return dict(row) if row else None
+
+    def scope_urls(self, scope: str) -> list[str]:
+        """读取指定分组，核心库存在后不再重新扫描和改写。"""
+        return [
+            row["url"]
+            for row in self.connection.execute(
+                "SELECT url FROM posts WHERE scope = ?", (scope,)
+            ).fetchall()
+        ]
 
     def update_post_metrics(self, post: dict, scope: str) -> None:
         self.connection.execute(
@@ -425,21 +440,21 @@ class KnowledgeStore:
             ),
         )
 
-    def prune_scope_to_urls(self, scope: str, urls: list[str]) -> None:
-        if not urls:
-            return
-        placeholders = ",".join("?" for _ in urls)
+    def archive_recent_except(self, active_urls: list[str]) -> int:
+        """把移出近期窗口的帖子降级归档，保留正文、回复和检索片段。"""
+        if not active_urls:
+            return 0
+        placeholders = ",".join("?" for _ in active_urls)
         with self.connection:
-            stale = self.connection.execute(
-                f"SELECT url FROM posts WHERE scope=? AND url NOT IN ({placeholders})", [scope, *urls]
-            ).fetchall()
-            stale_urls = [row["url"] for row in stale]
-            if stale_urls:
-                stale_placeholders = ",".join("?" for _ in stale_urls)
-                self.connection.execute(f"DELETE FROM qa_pairs WHERE post_url IN ({stale_placeholders})", stale_urls)
-                self.connection.execute(f"DELETE FROM chunks WHERE post_url IN ({stale_placeholders})", stale_urls)
-                self.connection.execute(f"DELETE FROM posts WHERE url IN ({stale_placeholders})", stale_urls)
-        self.rebuild_fts()
+            cursor = self.connection.execute(
+                f"""
+                UPDATE posts
+                SET scope = 'recent_archive', updated_at = ?
+                WHERE scope = 'recent_qa' AND url NOT IN ({placeholders})
+                """,
+                [datetime.now().isoformat(timespec="seconds"), *active_urls],
+            )
+        return cursor.rowcount
 
     def rebuild_fts(self) -> None:
         with self.connection:
@@ -466,7 +481,13 @@ class KnowledgeStore:
         ).fetchall()
         all_rows = [
             dict(row)
-            for row in self.connection.execute("SELECT * FROM chunks").fetchall()
+            for row in self.connection.execute(
+                """
+                SELECT c.*, COALESCE(p.scope, 'manual') AS scope
+                FROM chunks c
+                LEFT JOIN posts p ON p.url = c.post_url
+                """
+            ).fetchall()
         ]
         query_vector = _vector_features(query)
         vector_scores = {
@@ -513,7 +534,10 @@ class KnowledgeStore:
                 f"{row['title']} {row['content']}",
             )
             vector_score = vector_scores.get(row["id"], 0.0)
-            source_weight = SOURCE_WEIGHTS.get(row["source_type"], 0.5)
+            source_weight = (
+                SOURCE_WEIGHTS.get(row["source_type"], 0.5)
+                * SCOPE_WEIGHTS.get(row["scope"], 1.0)
+            )
             time_score = _time_score(row["published_at"], row["source_type"])
             topic_score = _topic_score(query_vector, content_vector)
             final_score = (
@@ -577,6 +601,9 @@ class KnowledgeStore:
         supplemental_count = self.connection.execute(
             "SELECT COUNT(*) FROM posts WHERE scope='recent_qa'"
         ).fetchone()[0]
+        archived_count = self.connection.execute(
+            "SELECT COUNT(*) FROM posts WHERE scope='recent_archive'"
+        ).fetchone()[0]
         qa_count = self.connection.execute("SELECT COUNT(*) FROM qa_pairs").fetchone()[0]
         community_count = self.connection.execute(
             "SELECT COUNT(*) FROM chunks WHERE source_type='community'"
@@ -595,6 +622,7 @@ class KnowledgeStore:
             "posts": post_count,
             "core_posts": core_count,
             "supplemental_posts": supplemental_count,
+            "archived_posts": archived_count,
             "qa_pairs": qa_count,
             "community_comments": community_count,
             "manual_sources": manual_source_count,
@@ -633,28 +661,39 @@ class KnowledgeStore:
         self.connection.commit()
 
 
-def sync_top_year(
+def sync_knowledge_incremental(
     progress: Callable[[str, int, int], None] | None = None,
 ) -> dict:
+    """首次建立核心 20 篇，之后只增量维护近期 10 篇。"""
     started_at = datetime.now().isoformat(timespec="seconds")
     with TgbCrawler() as crawler, KnowledgeStore() as store:
-        posts = crawler.discover_top_posts(
-            days=365,
-            limit=CRAWL_TOP_POST_LIMIT,
-            progress=progress,
-        )
+        core_urls = set(store.scope_urls("top_year"))
+        core_posts: list[dict] = []
+        needs_core_bootstrap = len(core_urls) < CRAWL_TOP_POST_LIMIT
+        if needs_core_bootstrap:
+            discovered_core = crawler.discover_top_posts(
+                days=365,
+                limit=CRAWL_TOP_POST_LIMIT,
+                progress=progress,
+            )
+            core_posts = [
+                post for post in discovered_core if post["url"] not in core_urls
+            ][: CRAWL_TOP_POST_LIMIT - len(core_urls)]
+            core_urls.update(post["url"] for post in core_posts)
         recent_posts = crawler.discover_recent_posts(limit=10)
-        top_urls = {post["url"] for post in posts}
-        supplements = [post for post in recent_posts if post["url"] not in top_urls]
-        work_items = [(post, "top_year") for post in posts] + [
+        supplements = [post for post in recent_posts if post["url"] not in core_urls]
+        work_items = [(post, "top_year") for post in core_posts] + [
             (post, "recent_qa") for post in supplements
         ]
         result = {
             "started_at": started_at,
             "finished_at": "",
             "discovered": len(work_items),
-            "core_posts": len(posts),
+            "core_posts": len(core_urls),
+            "core_bootstrapped": needs_core_bootstrap,
+            "core_frozen": not needs_core_bootstrap,
             "supplemental_posts": len(supplements),
+            "archived_this_run": 0,
             "fetched": 0,
             "reused": 0,
             "failed": 0,
@@ -685,9 +724,11 @@ def sync_top_year(
             except RuntimeError as exc:
                 result["failed"] += 1
                 result["errors"].append(f"{post['title']}：{exc}")
-        store.prune_scope_to_urls("top_year", [post["url"] for post in posts])
         if supplements:
-            store.prune_scope_to_urls("recent_qa", [post["url"] for post in supplements])
+            result["archived_this_run"] = store.archive_recent_except(
+                [post["url"] for post in supplements]
+            )
+        result["core_posts"] = len(store.scope_urls("top_year"))
         try:
             result["manual_source"] = store.import_manual_docx()
         except RuntimeError as exc:
@@ -695,3 +736,10 @@ def sync_top_year(
         result["finished_at"] = datetime.now().isoformat(timespec="seconds")
         store.record_run(result)
         return result
+
+
+def sync_top_year(
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
+    """兼容旧入口；实际执行冻结核心库后的增量更新。"""
+    return sync_knowledge_incremental(progress)

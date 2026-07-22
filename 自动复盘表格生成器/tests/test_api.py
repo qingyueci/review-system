@@ -90,7 +90,7 @@ def test_status_requires_token() -> None:
         headers={"X-Review-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 200
-    assert response.json()["service_version"] == "1.4.0"
+    assert response.json()["service_version"] == "1.5.0"
     assert response.json()["stats"]["chunks"] > 0
 
 

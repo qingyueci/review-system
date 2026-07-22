@@ -9,7 +9,7 @@ from .analysis import analyze_with_rag, review_data_to_text, workbook_to_text
 from .crawler import TgbCrawler
 from .docx_export import generate_analysis_docx
 from .excel import generate_excel
-from .knowledge import KnowledgeStore, sync_top_year
+from .knowledge import KnowledgeStore, sync_knowledge_incremental
 from .llm import parse_with_kimi
 from .preprocessing import preprocess_text
 from .validation import validate_data
@@ -97,20 +97,21 @@ def _render_review_page() -> None:
 
 
 def _render_knowledge_page() -> None:
-    st.subheader("近一年高阅读量知识库")
-    st.caption("一键同步：近一年浏览量前 20 篇、近期 10 篇公开评论区，以及本地《延边刺客短线打板体系》。")
+    st.subheader("增量知识库")
+    st.caption("核心 20 篇固定保留；日常只维护近期 10 篇，移出近期窗口的帖子降级归档但不会删除。")
     with KnowledgeStore() as store:
         stats = store.stats()
-    columns = st.columns(7)
+    columns = st.columns(8)
     columns[0].metric("高阅读量核心帖", stats["core_posts"])
     columns[1].metric("近期问答补充帖", stats["supplemental_posts"])
-    columns[2].metric("刺大公开回复", stats["qa_pairs"])
-    columns[3].metric("社区精选观点", stats["community_comments"])
-    columns[4].metric("检索片段", stats["chunks"])
-    columns[5].metric("人工体系文件", stats["manual_sources"])
-    columns[6].metric("最近更新", stats["last_sync"].replace("T", " "))
+    columns[2].metric("历史归档帖", stats["archived_posts"])
+    columns[3].metric("刺大公开回复", stats["qa_pairs"])
+    columns[4].metric("社区精选观点", stats["community_comments"])
+    columns[5].metric("检索片段", stats["chunks"])
+    columns[6].metric("人工体系文件", stats["manual_sources"])
+    columns[7].metric("最近更新", stats["last_sync"].replace("T", " "))
 
-    if st.button("🔄 一键更新完整知识库", type="primary"):
+    if st.button("🔄 增量更新近期 10 篇", type="primary"):
         bar = st.progress(0)
         status = st.empty()
 
@@ -119,7 +120,7 @@ def _render_knowledge_page() -> None:
             bar.progress(min(1.0, current / max(total, 1)))
 
         try:
-            result = sync_top_year(update_progress)
+            result = sync_knowledge_incremental(update_progress)
             bar.progress(1.0)
             status.empty()
             if result["failed"]:
@@ -150,6 +151,7 @@ def _render_knowledge_page() -> None:
         frame["scope"] = frame["scope"].map({
             "top_year": "近一年浏览量前20",
             "recent_qa": "近期公开问答补充",
+            "recent_archive": "历史问答归档",
         })
         for column in ("body_truncated", "comments_accessible"):
             frame[column] = frame[column].map({1: "是", 0: "否"})

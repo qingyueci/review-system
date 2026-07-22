@@ -2,11 +2,31 @@ from io import BytesIO
 
 from docx import Document
 
+import review_app.knowledge as knowledge_module
 from review_app.analysis import ANALYSIS_SYSTEM_PROMPT
 from review_app.cleaning import is_greeting_or_noise, normalize_text
 from review_app.crawler import TgbCrawler, _sample_pages
 from review_app.docx_export import generate_analysis_docx
 from review_app.knowledge import KnowledgeStore
+
+
+def _knowledge_post(url: str, title: str, body: str, reply_count: int = 1) -> dict:
+    return {
+        "url": url,
+        "topic_id": url.rsplit("/", 1)[-1],
+        "title": title,
+        "published_at": "2026-07-18T16:20",
+        "views": 100,
+        "reply_count": reply_count,
+        "likes": 5,
+        "summary": title,
+        "body": body,
+        "body_hash": f"hash-{title}",
+        "total_comment_pages": 1,
+        "scanned_comment_pages": [1],
+        "author_replies": [],
+        "community_comments": [],
+    }
 
 
 def test_cleaning_filters_greetings_but_keeps_layout_questions():
@@ -151,6 +171,73 @@ def test_hybrid_search_uses_vector_concepts_and_source_weight(tmp_path):
             item for item in results if item["source_type"] == "community"
         )
         assert results[0]["retrieval_score"] > community["retrieval_score"]
+
+
+def test_incremental_sync_freezes_core_and_archives_old_recent(tmp_path, monkeypatch):
+    database_path = tmp_path / "knowledge.db"
+    core = _knowledge_post(
+        "https://www.tgb.cn/a/core", "固定核心", "首板出身决定核心任务。"
+    )
+    old_recent = _knowledge_post(
+        "https://www.tgb.cn/a/old", "旧近期帖", "历史归档仍有布局参考价值。"
+    )
+    with KnowledgeStore(database_path) as store:
+        store.upsert_post(core, scope="top_year")
+        store.upsert_post(old_recent, scope="recent_qa")
+
+    new_listing = {
+        "url": "https://www.tgb.cn/a/new",
+        "topic_id": "new",
+        "title": "最新复盘",
+        "published_at": "2026-07-22T16:20",
+        "views": 200,
+        "reply_count": 2,
+        "likes": 8,
+        "summary": "最新复盘",
+    }
+
+    class TestStore(KnowledgeStore):
+        def __init__(self):
+            super().__init__(database_path)
+
+    class FakeCrawler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def discover_top_posts(self, **_kwargs):
+            raise AssertionError("已有核心库时不应重新扫描前 20 篇")
+
+        def discover_recent_posts(self, *, limit):
+            assert limit == 10
+            return [new_listing]
+
+        def fetch_post(self, post):
+            return _knowledge_post(
+                post["url"], post["title"], "最新个股承担板块发酵任务。", post["reply_count"]
+            )
+
+    monkeypatch.setattr(knowledge_module, "CRAWL_TOP_POST_LIMIT", 1)
+    monkeypatch.setattr(knowledge_module, "KnowledgeStore", TestStore)
+    monkeypatch.setattr(knowledge_module, "TgbCrawler", FakeCrawler)
+
+    result = knowledge_module.sync_knowledge_incremental()
+
+    assert result["core_frozen"] is True
+    assert result["fetched"] == 1
+    assert result["archived_this_run"] == 1
+    with KnowledgeStore(database_path) as store:
+        assert store.scope_urls("top_year") == [core["url"]]
+        assert store.scope_urls("recent_qa") == [new_listing["url"]]
+        assert store.scope_urls("recent_archive") == [old_recent["url"]]
+        archived = store.search("历史归档 布局参考价值", limit=5)
+        assert any(item["post_url"] == old_recent["url"] for item in archived)
+        archived_source = next(
+            item for item in archived if item["post_url"] == old_recent["url"]
+        )
+        assert archived_source["source_weight"] == 0.648
 
 
 def test_manual_system_docx_is_imported_as_rag_source(tmp_path):

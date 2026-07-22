@@ -20,7 +20,7 @@ from .config import DATA_DIR, PROJECT_DIR
 from .crawler import TgbCrawler
 from .generation_service import generate_review_outputs
 from .job_store import JobStore
-from .knowledge import KnowledgeStore, sync_top_year
+from .knowledge import KnowledgeStore, sync_knowledge_incremental
 from .llm import parse_with_kimi
 from .preprocessing import preprocess_text
 from .review_input import extract_review_text
@@ -32,7 +32,7 @@ SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
     "https://fupan-cockpit.junxicai1.chatgpt.site",
 ).rstrip("/")
-SERVICE_VERSION = "1.4.0"
+SERVICE_VERSION = "1.5.0"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
 DOCUMENT_DIR = PROJECT_DIR / "output"
 
@@ -246,7 +246,7 @@ def _run_sync(job_id: str) -> None:
         )
 
     try:
-        result = sync_top_year(progress)
+        result = sync_knowledge_incremental(progress)
         with KnowledgeStore() as store:
             stats = store.stats()
         JOB_MANAGER.update(
@@ -526,7 +526,7 @@ def start_sync(x_review_token: str | None = Header(default=None)) -> dict:
         {
             "kind": "sync",
             "status": "pending",
-            "message": "准备更新知识库",
+            "message": "准备增量更新近期知识",
             "current": 0,
             "total": 1,
         },
