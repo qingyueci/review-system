@@ -31,8 +31,8 @@ export function KnowledgeSection({
         </div>
         <button disabled={syncing} onClick={onSync}>
           {syncJob?.status === "running"
-            ? "正在执行…"
-            : "一键更新并语义清洗"}
+            ? "正在检查昨日新增…"
+            : "检查昨日新增帖子"}
         </button>
       </section>
       {syncJob &&
@@ -57,7 +57,7 @@ export function KnowledgeSection({
         <article>
           <span>近期补充帖</span>
           <strong>{stats.supplemental_posts}</strong>
-          <small>增量更新近期 10 篇 · 滚动维护最新 10 篇</small>
+          <small>仅检查昨日新增 · 新进一篇归档最旧一篇</small>
         </article>
         <article>
           <span>历史归档帖</span>

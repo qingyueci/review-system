@@ -735,7 +735,7 @@ export default function Home() {
           "/api/posts",
         );
         setKnowledgePosts(refreshed.posts);
-        showNotice("知识库更新与语义清洗已完成。");
+        showNotice("昨日新增检查与知识库更新已完成。");
       } else {
         showNotice(completed.message || "知识库更新失败");
       }
@@ -820,7 +820,7 @@ export default function Home() {
           {activeNav !== "首板布局" && (
             <>
               <button className="btn btn-secondary" disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>
-                {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "增量更新"}
+                {syncJob?.status === "running" ? "检查昨日新增中" : "检查昨日新增"}
               </button>
               <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
                 {isAnalyzing ? "正在生成…" : generationLabel}
