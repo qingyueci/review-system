@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 import math
 import re
@@ -22,6 +22,7 @@ STOP_WORDS = {
     "市场", "个股", "板块", "老师", "刺大", "发财",
 }
 CRAWL_PIPELINE_VERSION = 3
+RECENT_POST_LIMIT = 10
 SEMANTIC_MODEL = "BAAI/bge-small-zh-v1.5"
 SEMANTIC_INDEX_VERSION = "answer-v1"
 SEMANTIC_SAME_POST_THRESHOLD = 0.91
@@ -315,6 +316,21 @@ class KnowledgeStore:
             row["url"]
             for row in self.connection.execute(
                 "SELECT url FROM posts WHERE scope = ?", (scope,)
+            ).fetchall()
+        ]
+
+    def newest_scope_urls(self, scope: str, *, limit: int) -> list[str]:
+        """按发布时间读取最新分组，用于近期窗口的一进一出。"""
+        return [
+            row["url"]
+            for row in self.connection.execute(
+                """
+                SELECT url FROM posts
+                WHERE scope = ?
+                ORDER BY published_at DESC, url DESC
+                LIMIT ?
+                """,
+                (scope, max(1, int(limit))),
             ).fetchall()
         ]
 
@@ -988,7 +1004,7 @@ class KnowledgeStore:
 def sync_knowledge_incremental(
     progress: Callable[[str, int, int], None] | None = None,
 ) -> dict:
-    """首次建立核心 20 篇，之后只增量维护近期 10 篇。"""
+    """首次建立知识库；日常只抓取昨日新增并滚动近期窗口。"""
     started_at = datetime.now().isoformat(timespec="seconds")
     with TgbCrawler() as crawler, KnowledgeStore() as store:
         core_urls = set(store.scope_urls("top_year"))
@@ -1004,8 +1020,21 @@ def sync_knowledge_incremental(
                 post for post in discovered_core if post["url"] not in core_urls
             ][: CRAWL_TOP_POST_LIMIT - len(core_urls)]
             core_urls.update(post["url"] for post in core_posts)
-        recent_posts = crawler.discover_recent_posts(limit=10)
-        supplements = [post for post in recent_posts if post["url"] not in core_urls]
+        recent_urls = set(store.scope_urls("recent_qa"))
+        archived_urls = set(store.scope_urls("recent_archive"))
+        needs_recent_bootstrap = not recent_urls
+        target_date = date.today() - timedelta(days=1)
+        if needs_recent_bootstrap:
+            discovered_recent = crawler.discover_recent_posts(limit=RECENT_POST_LIMIT)
+            supplements = [
+                post for post in discovered_recent if post["url"] not in core_urls
+            ]
+        else:
+            discovered_recent = crawler.discover_posts_for_date(target_date=target_date)
+            known_urls = core_urls | recent_urls | archived_urls
+            supplements = [
+                post for post in discovered_recent if post["url"] not in known_urls
+            ]
         work_items = [(post, "top_year") for post in core_posts] + [
             (post, "recent_qa") for post in supplements
         ]
@@ -1016,6 +1045,8 @@ def sync_knowledge_incremental(
             "core_posts": len(core_urls),
             "core_bootstrapped": needs_core_bootstrap,
             "core_frozen": not needs_core_bootstrap,
+            "recent_bootstrapped": needs_recent_bootstrap,
+            "target_date": target_date.isoformat(),
             "supplemental_posts": len(supplements),
             "archived_this_run": 0,
             "fetched": 0,
@@ -1023,9 +1054,12 @@ def sync_knowledge_incremental(
             "failed": 0,
             "errors": [],
         }
+        recent_activated = 0
+        if not work_items and progress:
+            progress(f"昨日 {target_date.isoformat()} 未发现新增帖子", 1, 1)
         for index, (post, scope) in enumerate(work_items, 1):
             if progress:
-                label = "高阅读量主帖" if scope == "top_year" else "近期公开问答补充"
+                label = "高阅读量主帖" if scope == "top_year" else "昨日新增问答"
                 progress(f"正在处理 {index}/{len(work_items)}：{post['title']}（{label}）", index, len(work_items))
             state = store.post_state(post["url"])
             if (
@@ -1041,23 +1075,37 @@ def sync_knowledge_incremental(
             ):
                 store.update_post_metrics(post, scope)
                 result["reused"] += 1
+                if scope == "recent_qa":
+                    recent_activated += 1
                 continue
             try:
                 store.upsert_post(crawler.fetch_post(post), scope=scope)
                 result["fetched"] += 1
+                if scope == "recent_qa":
+                    recent_activated += 1
             except RuntimeError as exc:
                 result["failed"] += 1
                 result["errors"].append(f"{post['title']}：{exc}")
-        if supplements:
+        if recent_activated:
+            active_recent_urls = store.newest_scope_urls(
+                "recent_qa", limit=RECENT_POST_LIMIT
+            )
             result["archived_this_run"] = store.archive_recent_except(
-                [post["url"] for post in supplements]
+                active_recent_urls
             )
         result["core_posts"] = len(store.scope_urls("top_year"))
         try:
             result["manual_source"] = store.import_manual_docx()
         except RuntimeError as exc:
             result["manual_source"] = {"imported": False, "error": str(exc)}
-        result["semantic_clean"] = store.semantic_clean_qa(progress)
+        knowledge_changed = bool(result["fetched"] or result["manual_source"].get("imported"))
+        if knowledge_changed:
+            result["semantic_clean"] = store.semantic_clean_qa(progress)
+        else:
+            result["semantic_clean"] = {
+                "skipped": True,
+                "reason": "昨日无新增帖子且人工体系未变化",
+            }
         result["finished_at"] = datetime.now().isoformat(timespec="seconds")
         store.record_run(result)
         return result

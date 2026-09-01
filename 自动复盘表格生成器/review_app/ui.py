@@ -98,7 +98,7 @@ def _render_review_page() -> None:
 
 def _render_knowledge_page() -> None:
     st.subheader("增量知识库")
-    st.caption("核心 20 篇固定保留；日常只维护近期 10 篇，移出近期窗口的帖子降级归档但不会删除。")
+    st.caption("核心 20 篇固定保留；日常只检查昨日新增帖子，新进一篇时归档近期窗口中最旧的一篇。")
     with KnowledgeStore() as store:
         stats = store.stats()
     columns = st.columns(8)
@@ -111,7 +111,7 @@ def _render_knowledge_page() -> None:
     columns[6].metric("人工体系文件", stats["manual_sources"])
     columns[7].metric("最近更新", stats["last_sync"].replace("T", " "))
 
-    if st.button("🔄 增量更新近期 10 篇", type="primary"):
+    if st.button("🔄 检查昨日新增帖子", type="primary"):
         bar = st.progress(0)
         status = st.empty()
 

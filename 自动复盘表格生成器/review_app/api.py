@@ -33,7 +33,7 @@ SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
     "https://fupan-review-cockpit.netlify.app",
 ).rstrip("/")
-SERVICE_VERSION = "1.9.1"
+SERVICE_VERSION = "1.9.2"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
 DOCUMENT_DIR = PROJECT_DIR / "output"
 
@@ -260,7 +260,7 @@ def _run_sync(job_id: str) -> None:
         JOB_MANAGER.update(
             job_id,
             status="succeeded",
-            message="知识库更新与语义清洗完成",
+            message="昨日新增检查与知识库更新完成",
             result=result,
             stats=stats,
         )
@@ -535,7 +535,7 @@ def start_sync(x_review_token: str | None = Header(default=None)) -> dict:
         {
             "kind": "sync",
             "status": "pending",
-            "message": "准备更新并语义清洗知识库",
+            "message": "准备检查昨日新增帖子",
             "current": 0,
             "total": 1,
         },

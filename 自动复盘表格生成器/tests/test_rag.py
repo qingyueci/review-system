@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from io import BytesIO
 
 from docx import Document
@@ -11,12 +12,19 @@ from review_app.docx_export import generate_analysis_docx
 from review_app.knowledge import KnowledgeStore
 
 
-def _knowledge_post(url: str, title: str, body: str, reply_count: int = 1) -> dict:
+def _knowledge_post(
+    url: str,
+    title: str,
+    body: str,
+    reply_count: int = 1,
+    *,
+    published_at: str = "2026-07-18T16:20",
+) -> dict:
     return {
         "url": url,
         "topic_id": url.rsplit("/", 1)[-1],
         "title": title,
-        "published_at": "2026-07-18T16:20",
+        "published_at": published_at,
         "views": 100,
         "reply_count": reply_count,
         "likes": 5,
@@ -61,6 +69,34 @@ def test_mobile_listing_parser_reads_metrics():
     assert posts[0]["views"] == 123456
     assert posts[0]["reply_count"] == 789
     assert posts[0]["url"] == "https://www.tgb.cn/a/demo"
+
+
+def test_daily_listing_discovery_stops_after_older_posts():
+    crawler = object.__new__(TgbCrawler)
+    requested: list[int] = []
+    pages = {
+        1: [
+            {"url": "today", "published_at": "2026-07-23T10:00"},
+            {"url": "yesterday-1", "published_at": "2026-07-22T16:20"},
+        ],
+        2: [
+            {"url": "yesterday-2", "published_at": "2026-07-22T09:00"},
+            {"url": "older", "published_at": "2026-07-21T18:00"},
+        ],
+    }
+
+    def fake_get(url: str) -> str:
+        page = int(url.rsplit("=", 1)[-1])
+        requested.append(page)
+        return str(page)
+
+    crawler._get = fake_get
+    crawler._parse_listing = lambda value: pages.get(int(value), [])
+
+    posts = crawler.discover_posts_for_date(target_date=date(2026, 7, 22))
+
+    assert requested == [1, 2]
+    assert [post["url"] for post in posts] == ["yesterday-1", "yesterday-2"]
 
 
 def test_community_comments_use_likes_and_layout_relevance():
@@ -231,12 +267,19 @@ def test_incremental_sync_freezes_core_and_archives_old_recent(tmp_path, monkeyp
     core = _knowledge_post(
         "https://www.tgb.cn/a/core", "固定核心", "首板出身决定核心任务。"
     )
-    old_recent = _knowledge_post(
-        "https://www.tgb.cn/a/old", "旧近期帖", "历史归档仍有布局参考价值。"
-    )
+    old_recent_posts = [
+        _knowledge_post(
+            f"https://www.tgb.cn/a/old-{index}",
+            f"旧近期帖{index}",
+            "历史归档仍有布局参考价值。",
+            published_at=f"2026-07-{index + 1:02d}T16:20",
+        )
+        for index in range(10)
+    ]
     with KnowledgeStore(database_path) as store:
         store.upsert_post(core, scope="top_year")
-        store.upsert_post(old_recent, scope="recent_qa")
+        for post in old_recent_posts:
+            store.upsert_post(post, scope="recent_qa")
 
     new_listing = {
         "url": "https://www.tgb.cn/a/new",
@@ -264,7 +307,10 @@ def test_incremental_sync_freezes_core_and_archives_old_recent(tmp_path, monkeyp
             raise AssertionError("已有核心库时不应重新扫描前 20 篇")
 
         def discover_recent_posts(self, *, limit):
-            assert limit == 10
+            raise AssertionError("已有近期窗口时不应重新遍历 10 篇")
+
+        def discover_posts_for_date(self, *, target_date):
+            assert target_date == date.today() - timedelta(days=1)
             return [new_listing]
 
         def fetch_post(self, post):
@@ -279,18 +325,84 @@ def test_incremental_sync_freezes_core_and_archives_old_recent(tmp_path, monkeyp
     result = knowledge_module.sync_knowledge_incremental()
 
     assert result["core_frozen"] is True
+    assert result["recent_bootstrapped"] is False
     assert result["fetched"] == 1
     assert result["archived_this_run"] == 1
     with KnowledgeStore(database_path) as store:
         assert store.scope_urls("top_year") == [core["url"]]
-        assert store.scope_urls("recent_qa") == [new_listing["url"]]
-        assert store.scope_urls("recent_archive") == [old_recent["url"]]
-        archived = store.search("历史归档 布局参考价值", limit=5)
-        assert any(item["post_url"] == old_recent["url"] for item in archived)
+        recent_urls = set(store.scope_urls("recent_qa"))
+        assert len(recent_urls) == 10
+        assert new_listing["url"] in recent_urls
+        assert old_recent_posts[0]["url"] not in recent_urls
+        assert store.scope_urls("recent_archive") == [old_recent_posts[0]["url"]]
+        archived = store.search("历史归档 布局参考价值", limit=20)
+        assert any(item["post_url"] == old_recent_posts[0]["url"] for item in archived)
         archived_source = next(
-            item for item in archived if item["post_url"] == old_recent["url"]
+            item for item in archived if item["post_url"] == old_recent_posts[0]["url"]
         )
         assert archived_source["source_weight"] == 0.648
+
+
+def test_daily_sync_skips_yesterday_post_already_in_recent_window(tmp_path, monkeypatch):
+    database_path = tmp_path / "knowledge.db"
+    core = _knowledge_post("https://www.tgb.cn/a/core", "固定核心", "核心内容")
+    existing = _knowledge_post(
+        "https://www.tgb.cn/a/existing",
+        "已入库昨日帖",
+        "原始内容",
+        reply_count=2,
+    )
+    with KnowledgeStore(database_path) as store:
+        store.upsert_post(core, scope="top_year")
+        store.upsert_post(existing, scope="recent_qa")
+
+    existing_listing = {
+        **{key: existing[key] for key in (
+            "url", "topic_id", "title", "published_at", "views", "likes", "summary"
+        )},
+        "reply_count": 99,
+    }
+
+    class TestStore(KnowledgeStore):
+        def __init__(self):
+            super().__init__(database_path)
+
+        def import_manual_docx(self, path=None):
+            return {"imported": False, "chunks": 0}
+
+    class FakeCrawler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def discover_top_posts(self, **_kwargs):
+            raise AssertionError("已有核心库时不应重新扫描")
+
+        def discover_recent_posts(self, *, limit):
+            raise AssertionError("已有近期窗口时不应重新遍历 10 篇")
+
+        def discover_posts_for_date(self, *, target_date):
+            assert target_date == date.today() - timedelta(days=1)
+            return [existing_listing]
+
+        def fetch_post(self, post):
+            raise AssertionError("已入库的昨日帖子不应再次抓取")
+
+    monkeypatch.setattr(knowledge_module, "CRAWL_TOP_POST_LIMIT", 1)
+    monkeypatch.setattr(knowledge_module, "KnowledgeStore", TestStore)
+    monkeypatch.setattr(knowledge_module, "TgbCrawler", FakeCrawler)
+
+    result = knowledge_module.sync_knowledge_incremental()
+
+    assert result["supplemental_posts"] == 0
+    assert result["fetched"] == 0
+    assert result["reused"] == 0
+    assert result["archived_this_run"] == 0
+    assert result["semantic_clean"]["skipped"] is True
+    with KnowledgeStore(database_path) as store:
+        assert store.post_state(existing["url"])["reply_count"] == 2
 
 
 def test_manual_system_docx_is_imported_as_rag_source(tmp_path):

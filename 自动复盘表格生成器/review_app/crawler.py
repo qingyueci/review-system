@@ -170,7 +170,7 @@ class TgbCrawler:
         return sorted(unique.values(), key=lambda row: (row["views"], row["reply_count"]), reverse=True)[:limit]
 
     def discover_recent_posts(self, *, limit: int = 10) -> list[dict]:
-        """补充近期仍公开评论区的帖子，用于建立问答语料。"""
+        """仅供首次建立近期窗口；日常同步改用昨日新增发现。"""
         found: list[dict] = []
         page = 1
         while len(found) < limit and page <= CRAWL_MAX_LIST_PAGES:
@@ -180,6 +180,23 @@ class TgbCrawler:
             found.extend(rows)
             page += 1
         return found[:limit]
+
+    def discover_posts_for_date(self, *, target_date: date) -> list[dict]:
+        """按发布日期发现帖子；列表进入更早日期后立即停止。"""
+        found: list[dict] = []
+        for page in range(1, CRAWL_MAX_LIST_PAGES + 1):
+            rows = self._parse_listing(self._get(f"{AUTHOR_BLOG_URL}?pageNo={page}"))
+            if not rows:
+                break
+            row_dates = [datetime.fromisoformat(row["published_at"]).date() for row in rows]
+            found.extend(
+                row for row, published_on in zip(rows, row_dates, strict=True)
+                if published_on == target_date
+            )
+            if min(row_dates) < target_date:
+                break
+        unique = {row["url"]: row for row in found}
+        return sorted(unique.values(), key=lambda row: row["published_at"], reverse=True)
 
     @staticmethod
     def _parse_comment(item, post: dict, page: int) -> dict | None:

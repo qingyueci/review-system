@@ -95,7 +95,7 @@ def test_status_requires_token() -> None:
     assert payload["api_key_configured"] is True
     assert payload["default_model"] == "deepseek-v4-flash"
     assert payload["available_models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
-    assert response.json()["service_version"] == "1.9.1"
+    assert response.json()["service_version"] == "1.9.2"
     assert response.json()["stats"]["chunks"] > 0
 
 

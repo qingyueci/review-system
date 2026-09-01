@@ -4,7 +4,7 @@ $rootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcherLog = Join-Path $rootDir "review-cockpit-launcher.log"
 $siteUrl = "https://fupan-review-cockpit.netlify.app"
 $statusUrl = "http://127.0.0.1:8765/api/status"
-$expectedServiceVersion = "1.9.1"
+$expectedServiceVersion = "1.9.2"
 
 function Write-LauncherLog {
     param([string]$Message)
