@@ -7,6 +7,7 @@ from docx import Document
 import pytest
 
 from review_app.dragon.analysis import (
+    BATCH_ANALYSIS_SYSTEM_PROMPT,
     DragonAnalysisService,
     DragonBatchValidationError,
     parse_batch_analysis_result,
@@ -194,3 +195,39 @@ def test_qualified_exclusion_still_rejects_other_reason():
             [context],
             policy=DragonSelectionPolicy(),
         )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "与用户确认复盘方向冲突：传媒应用让位算力",
+        "与用户确认复盘方向冲突：该方向不是主线",
+        "与用户确认复盘方向冲突：仅为主线狗腿子",
+        "与用户确认复盘方向冲突：板块无响应、无发酵",
+    ],
+)
+def test_relative_priority_language_cannot_exclude_qualified_candidate(reason):
+    context = build_analysis_context(
+        snapshot=_snapshot(),
+        screening=evaluate_rules(_candidate("000001", "甲股"), []),
+    )
+    with pytest.raises(DragonBatchValidationError, match="基础合格候选排除理由不被允许"):
+        parse_batch_analysis_result(
+            {
+                "results": [{
+                    "stock_code": "000001",
+                    "conclusion": "排除",
+                    "review_conflict": True,
+                    "exclusion_reason": reason,
+                    "history_dates": [],
+                    "analysis": {},
+                }]
+            },
+            [context],
+            policy=DragonSelectionPolicy(),
+        )
+
+
+def test_batch_prompt_distinguishes_board_order_from_board_height():
+    assert "same_attribute_orders 仅表示同属性首板的日内上板先后" in BATCH_ANALYSIS_SYSTEM_PROMPT
+    assert "不得把顺序靠后写成“身位靠后”" in BATCH_ANALYSIS_SYSTEM_PROMPT

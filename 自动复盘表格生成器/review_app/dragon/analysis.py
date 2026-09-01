@@ -62,10 +62,13 @@ BATCH_ANALYSIS_SYSTEM_PROMPT = """你是“A股首板布局批量决策器”。
 2. 历史资料只说明过去是什么，不替代当日判断。历史辨识度不足默认观察，但不是唯一分类标准。
 3. 重点是合格候选中的相对选择，最多5只。只有全部候选都与确认复盘方向冲突时才允许0只重点。
 4. 基础合格股仅可因“与用户确认复盘方向冲突”而排除，必须明确给出该理由。
-5. 板块当日没有响应/无发酵不抹掉历史身份，只作为次日确认或失效条件。
-6. 不自动把历史高度解释为老龙；只使用证据卡里的客观高度分层。
-7. 你自行决定每只股票 analysis 的内容、层级、长度与表达，不套固定文案范式。
-8. history_dates 只可填写候选给定的具体日期；不输出历史原文、文件名或切片编号。
+5. “让位、非主线、狗腿子、无响应、无发酵”只表示相对优先级或次日待确认，不等于方向冲突，不能单独作为排除理由。
+6. same_attribute_orders 仅表示同属性首板的日内上板先后，不是连板身位；不得把顺序靠后写成“身位靠后”。同属性比较还需同时看首封、公开炸板次数、封单占比、换手与历史证据。
+7. 板块当日没有响应/无发酵不抹掉历史身份，只作为次日确认或失效条件。
+8. 不自动把历史高度解释为老龙；只使用证据卡里的客观高度分层。
+9. 多只重点来自同一属性时，必须说明各自相对优势，不能只因历史高度或上板顺序重复占位。
+10. 你自行决定每只股票 analysis 的内容、层级、长度与表达，不套固定文案范式。
+11. history_dates 只可填写候选给定的具体日期；不输出历史原文、文件名或切片编号。
 
 为便于程序校验，顶层控制字段固定，analysis 内容完全自由：
 {
@@ -218,12 +221,19 @@ def _is_allowed_qualified_exclusion_reason(
 ) -> bool:
     """允许固定理由本身，或在固定理由后用冒号/括号补充具体说明。"""
 
+    relative_priority_markers = ("让位", "非主线", "不是主线", "狗腿子", "无响应", "无发酵")
+    explicit_invalidation_markers = ("明确失效", "方向失效", "明确排除", "不参与", "不布局")
     for allowed in allowed_reasons:
         if reason == allowed:
             return True
         if reason.startswith(allowed):
             suffix = reason[len(allowed):].lstrip()
             if suffix.startswith(("：", "（", "(")):
+                if (
+                    any(marker in suffix for marker in relative_priority_markers)
+                    and not any(marker in suffix for marker in explicit_invalidation_markers)
+                ):
+                    continue
                 return True
     return False
 
