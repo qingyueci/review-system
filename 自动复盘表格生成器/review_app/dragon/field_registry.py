@@ -32,7 +32,7 @@ FIELD_REGISTRY: dict[str, FieldDefinition] = {
     "last_seal_time": FieldDefinition("last_seal_time", "最终封板时间", "行情", "time"),
     "break_times": FieldDefinition("break_times", "分钟炸板线索", "分钟行情", "list[time]"),
     "board_break_count": FieldDefinition("board_break_count", "炸板次数", "行情", "integer"),
-    "public_late_break": FieldDefinition("public_late_break", "第一次炸板发生在13:00后", "分钟行情", "boolean", required=True, derived=True, description="炸板次数达到2次时，仅按全天第一次炸板时间是否不早于13:00判断；少于2次通过"),
+    "public_late_break": FieldDefinition("public_late_break", "上午首封后第一次炸板发生在13:00后", "分钟行情", "boolean", required=True, derived=True, description="炸板次数达到2次且上午已经首封时，按全天第一次炸板时间是否不早于13:00判断；下午首封后再炸不计入；少于2次通过"),
     "break_suspected": FieldDefinition("break_suspected", "炸板疑似异常", "派生标记", "boolean", derived=True),
     "peak_order_amount": FieldDefinition("peak_order_amount", "峰值封单", "行情", "number", "元"),
     "final_order_amount": FieldDefinition("final_order_amount", "最终封单", "行情", "number", "元", required=True),
@@ -76,7 +76,7 @@ def default_hard_rule_inputs() -> list[RuleDefinitionInput]:
         RuleDefinitionInput(name="收盘封住涨停", data_field="close_limit_up", calculation="收盘状态仍封住涨停", comparison="=", threshold=True, **common),
         RuleDefinitionInput(name="最终封单额", data_field="final_order_amount", calculation="收盘最终封单额，单位元", comparison=">", threshold=100_000_000, **common),
         RuleDefinitionInput(name="流通市值", data_field="float_market_cap", calculation="流通市值，单位元", comparison="<", threshold=3_000_000_000, **common),
-        RuleDefinitionInput(name="午后首次炸板", data_field="public_late_break", calculation="炸板次数少于2次通过；达到2次时，仅当全天第一次炸板发生在13:00后才不通过", comparison="=", threshold=False, **common),
+        RuleDefinitionInput(name="午后首次炸板", data_field="public_late_break", calculation="炸板次数少于2次通过；达到2次且上午已经首封时，全天第一次炸板发生在13:00后才不通过；下午首封后再炸不计入", comparison="=", threshold=False, **common),
     ]
 
 

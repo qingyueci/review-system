@@ -368,12 +368,16 @@ class EastmoneyDragonMarketProvider(DragonMarketProvider):
             last_seal_time = self._format_hhmmss(row.get("lbt"))
             public_late_break = _derive_public_late_break(
                 board_break_count,
+                first_seal_time=first_seal_time,
                 break_times=breaks,
             )
             suspicion_reasons: list[str] = []
+            normalized_first_seal = _normalise_time(first_seal_time)
             if (
                 board_break_count is not None
                 and board_break_count >= 2
+                and normalized_first_seal is not None
+                and normalized_first_seal < "13:00:00"
                 and (breaks is None or len(breaks) != board_break_count)
             ):
                 suspicion_reasons.append(
@@ -548,18 +552,22 @@ def _derive_public_late_break(
     board_break_count: int | None,
     last_seal_time: str | None = None,
     *,
+    first_seal_time: str | None = None,
     break_times: Iterable[Any] | None = None,
 ) -> bool:
-    """仅当全天第一次炸板发生在13:00后时标记为午后炸板。
+    """仅标记“上午首封后，全天第一次炸板发生在13:00后”。
 
-    分钟行情能给出炸板时刻时以第一次炸板为准；缺少分钟明细时不使用
-    “最终封板时间”反推第一次炸板。公开炸板次数少于2次直接按放宽口径
-    通过，达到2次但明细不完整只由上游添加疑似标记，不触发硬性淘汰。
+    下午才首次封板的股票，即使之后发生炸板，也不归入本规则。分钟行情
+    能给出炸板时刻时以第一次炸板为准；缺少分钟明细时不使用“最终封板
+    时间”反推第一次炸板。公开炸板次数少于2次直接按放宽口径通过。
     ``last_seal_time`` 仅为兼容旧调用保留。
     """
 
     del last_seal_time
     if board_break_count is None or board_break_count < 2:
+        return False
+    normalized_first_seal = _normalise_time(first_seal_time)
+    if normalized_first_seal is not None and normalized_first_seal >= "13:00:00":
         return False
     normalized_breaks = [
         normalized
@@ -659,6 +667,7 @@ def normalize_market_record(
         values["public_late_break"] = _derive_public_late_break(
             values["board_break_count"],
             values["last_seal_time"],
+            first_seal_time=values["first_seal_time"],
             break_times=values["break_times"],
         )
     _derive_metrics(values)

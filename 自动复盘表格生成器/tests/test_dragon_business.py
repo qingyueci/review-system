@@ -49,7 +49,7 @@ def test_confirmed_rules_boundary_and_late_break_bucket(tmp_path):
         candidate(
             "000002",
             "乙股",
-            "13:10",
+            "09:30",
             board_break_count=2,
             break_times=["13:05:00", "13:08:00"],
         ),

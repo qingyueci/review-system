@@ -249,6 +249,17 @@ def test_first_break_after_1300_drives_late_break_rule_and_under_two_is_relaxed(
         ),
         version.rules,
     )
+    afternoon_first_seal = evaluate_rules(
+        candidate(
+            "000004",
+            "丁股",
+            first="13:08:07",
+            board_break_count=2,
+            break_times=["13:20:00", "14:10:00"],
+            last_seal_time="14:25:55",
+        ),
+        version.rules,
+    )
 
     assert suspected_only.basic_pass is True
     assert suspected_only.candidate.break_suspected is True
@@ -256,6 +267,29 @@ def test_first_break_after_1300_drives_late_break_rule_and_under_two_is_relaxed(
     assert confirmed_late.basic_pass is False
     assert confirmed_late.candidate_bucket == "late_break_watch"
     assert morning_first.basic_pass is True
+    assert afternoon_first_seal.basic_pass is True
+    assert afternoon_first_seal.candidate.public_late_break is False
+
+
+def test_afternoon_first_seal_does_not_emit_minute_mismatch_suspicion(monkeypatch):
+    provider = EastmoneyDragonMarketProvider()
+    current_row = {
+        "c": "000001", "n": "甲股", "p": 10_000, "lbc": 1,
+        "fbt": 130807, "lbt": 142555, "zbc": 2, "fund": 55_545_740,
+        "amount": 100_000_000, "hs": 5.0, "ltsz": 9_269_658_706.93,
+    }
+    monkeypatch.setattr(provider, "_pool", lambda day: [current_row] if day == TRADE_DATE else [])
+    monkeypatch.setattr(provider, "_previous_trade_date", lambda _day: TRADE_DATE.replace(day=27))
+    monkeypatch.setattr(provider, "_trend_break_times", lambda *_args, **_kwargs: (["13:20:00"], "1m:fixture"))
+    try:
+        found = provider.fetch_first_board_candidates(TRADE_DATE)
+    finally:
+        provider.close()
+
+    assert len(found) == 1
+    assert found[0].public_late_break is False
+    assert found[0].break_suspected is False
+    assert found[0].break_suspicion_reasons == []
 
 
 def test_docx_case_headings_build_exact_name_route(tmp_path):
