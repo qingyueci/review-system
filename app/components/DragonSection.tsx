@@ -245,6 +245,15 @@ function asStrings(value: unknown): string[] {
   return [];
 }
 
+function hasRelevantBreakSuspicion(metrics: JsonRecord): boolean {
+  const firstSeal = asText(metrics.first_seal_time);
+  return (
+    asBool(metrics.break_suspected) &&
+    /^\d{2}:\d{2}/.test(firstSeal) &&
+    firstSeal.slice(0, 5) < "13:00"
+  );
+}
+
 function asJoinedText(value: unknown): string {
   return Array.isArray(value) ? asStrings(value).join("；") : asText(value);
 }
@@ -1265,7 +1274,7 @@ export function DragonSection({
               </div>
               <span className="hint">
                 {candidates.length
-                  ? `${candidates.length} 只 · ${candidates.filter((item) => item.candidate_bucket === "qualified").length} 合格 · ${candidates.filter((item) => item.candidate_bucket === "late_break_watch").length} 午后炸板 · ${candidates.filter((item) => asBool(item.metrics.break_suspected)).length} 疑似标记`
+                  ? `${candidates.length} 只 · ${candidates.filter((item) => item.candidate_bucket === "qualified").length} 合格 · ${candidates.filter((item) => item.candidate_bucket === "late_break_watch").length} 午后炸板 · ${candidates.filter((item) => hasRelevantBreakSuspicion(item.metrics)).length} 疑似标记`
                   : "尚未运行"}
               </span>
             </div>
@@ -1351,8 +1360,11 @@ export function DragonSection({
                         ? ` · 同属性顺序 ${Object.entries(candidate.same_attribute_orders).map(([key, value]) => `${key} ${String(value)}`).join("；")}`
                         : ""}
                     </p>
-                    {asBool(candidate.metrics.break_suspected) && (
-                      <p className="dragon-attribute-line"><b>炸板标记：</b>公开数据未确认，分钟行情存在疑似异常</p>
+                    {hasRelevantBreakSuspicion(candidate.metrics) && (
+                      <p className="dragon-attribute-line">
+                        <b>炸板标记：</b>
+                        {asStrings(candidate.metrics.break_suspicion_reasons).join("；") || "分钟行情未完整还原炸板时点"}
+                      </p>
                     )}
                     <details className="dragon-candidate-details">
                       <summary>查看完整规则与证据</summary>
