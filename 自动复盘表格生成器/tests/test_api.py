@@ -20,6 +20,7 @@ from review_app.job_store import JobStore
 def isolate_persisted_jobs(monkeypatch, tmp_path) -> None:
     import review_app.api as api_module
 
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     store = JobStore(tmp_path / "review_jobs.db")
     monkeypatch.setattr(api_module, "JOB_STORE", store)
     monkeypatch.setattr(api_module.JOB_MANAGER, "store", store)
@@ -90,7 +91,11 @@ def test_status_requires_token() -> None:
         headers={"X-Review-Token": SERVICE_TOKEN},
     )
     assert response.status_code == 200
-    assert response.json()["service_version"] == "1.5.0"
+    payload = response.json()
+    assert payload["api_key_configured"] is True
+    assert payload["default_model"] == "deepseek-v4-flash"
+    assert payload["available_models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert response.json()["service_version"] == "1.9.1"
     assert response.json()["stats"]["chunks"] > 0
 
 
@@ -110,7 +115,7 @@ def test_full_analysis_and_document_history(monkeypatch, tmp_path) -> None:
     """
     monkeypatch.setattr(api_module, "DOCUMENT_DIR", tmp_path)
     monkeypatch.setattr(api_module, "analyze_with_rag", lambda *_args, **_kwargs: analysis)
-    monkeypatch.setattr(api_module, "parse_with_kimi", lambda *_args, **_kwargs: _structured_review())
+    monkeypatch.setattr(api_module, "parse_with_deepseek", lambda *_args, **_kwargs: _structured_review())
     client = TestClient(app, base_url="http://127.0.0.1")
     headers = {"X-Review-Token": SERVICE_TOKEN}
     response = client.post(
@@ -170,7 +175,7 @@ def test_async_analysis_returns_job_and_result(monkeypatch, tmp_path) -> None:
     """
     monkeypatch.setattr(api_module, "DOCUMENT_DIR", tmp_path)
     monkeypatch.setattr(api_module, "analyze_with_rag", lambda *_args, **_kwargs: analysis)
-    monkeypatch.setattr(api_module, "parse_with_kimi", lambda *_args, **_kwargs: _structured_review())
+    monkeypatch.setattr(api_module, "parse_with_deepseek", lambda *_args, **_kwargs: _structured_review())
     client = TestClient(app, base_url="http://127.0.0.1")
     headers = {"X-Review-Token": SERVICE_TOKEN}
 
@@ -237,7 +242,7 @@ def test_parallel_generation_keeps_excel_when_word_fails(monkeypatch, tmp_path) 
     monkeypatch.setattr(api_module, "DOCUMENT_DIR", tmp_path)
     monkeypatch.setattr(
         api_module,
-        "parse_with_kimi",
+        "parse_with_deepseek",
         lambda *_args, **_kwargs: _structured_review(),
     )
 
@@ -280,7 +285,7 @@ def test_generation_job_survives_memory_clear_and_retries_failed_word(
     monkeypatch.setattr(api_module, "DOCUMENT_DIR", tmp_path)
     monkeypatch.setattr(
         api_module,
-        "parse_with_kimi",
+        "parse_with_deepseek",
         lambda *_args, **_kwargs: _structured_review(),
     )
     monkeypatch.setattr(

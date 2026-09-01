@@ -1,6 +1,7 @@
 from io import BytesIO
 
 from docx import Document
+import numpy as np
 
 import review_app.knowledge as knowledge_module
 from review_app.analysis import ANALYSIS_SYSTEM_PROMPT
@@ -171,6 +172,58 @@ def test_hybrid_search_uses_vector_concepts_and_source_weight(tmp_path):
             item for item in results if item["source_type"] == "community"
         )
         assert results[0]["retrieval_score"] > community["retrieval_score"]
+
+
+def test_semantic_clean_keeps_raw_replies_and_indexes_representatives(
+    tmp_path, monkeypatch
+):
+    post = _knowledge_post(
+        "https://www.tgb.cn/a/semantic", "语义清洗", "首板出身决定个股任务。", 3
+    )
+    post["author_replies"] = [
+        {
+            "reply_id": "qa-1", "question": "怎么看首板",
+            "answer": "首板的发酵来源决定了个股后续承担的任务，需要结合板块主动性判断。",
+            "published_at": "2026-07-18 18:00", "floor": 1, "likes": 8,
+            "source_url": "https://www.tgb.cn/a/semantic#1",
+        },
+        {
+            "reply_id": "qa-2", "question": "怎么看个股任务",
+            "answer": "个股后续承担什么任务，首先要回到首板的发酵来源和板块主动性。",
+            "published_at": "2026-07-18 18:01", "floor": 2, "likes": 2,
+            "source_url": "https://www.tgb.cn/a/semantic#2",
+        },
+        {
+            "reply_id": "qa-3", "question": "市场走弱怎么办",
+            "answer": "市场整体走弱时先降低仓位，等待新的确认信号，不要急着扩大交易。",
+            "published_at": "2026-07-18 18:02", "floor": 3, "likes": 1,
+            "source_url": "https://www.tgb.cn/a/semantic#3",
+        },
+    ]
+
+    class FakeEmbedding:
+        def embed(self, texts, batch_size=64):
+            assert batch_size == 64
+            vectors = {
+                post["author_replies"][0]["answer"]: np.array([1.0, 0.0, 0.0]),
+                post["author_replies"][1]["answer"]: np.array([0.999, 0.01, 0.0]),
+                post["author_replies"][2]["answer"]: np.array([0.0, 1.0, 0.0]),
+            }
+            return (vectors[text] for text in texts)
+
+    monkeypatch.setattr(knowledge_module, "_embedding_model", lambda *_args: FakeEmbedding())
+    with KnowledgeStore(tmp_path / "knowledge.db") as store:
+        store.upsert_post(post)
+        cleaned = store.semantic_clean_qa()
+        stats = store.stats()
+        raw_count = store.connection.execute("SELECT COUNT(*) FROM qa_pairs").fetchone()[0]
+        indexed_count = store.connection.execute(
+            "SELECT COUNT(*) FROM chunks WHERE source_type='qa'"
+        ).fetchone()[0]
+
+    assert cleaned["original"] == raw_count == 3
+    assert cleaned["retrievable"] == indexed_count == 2
+    assert cleaned["duplicates"] == stats["semantic_duplicates"] == 1
 
 
 def test_incremental_sync_freezes_core_and_archives_old_recent(tmp_path, monkeypatch):

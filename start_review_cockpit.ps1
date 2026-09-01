@@ -2,9 +2,9 @@ $ErrorActionPreference = "Stop"
 
 $rootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcherLog = Join-Path $rootDir "review-cockpit-launcher.log"
-$siteUrl = "https://fupan-cockpit.junxicai1.chatgpt.site"
+$siteUrl = "https://fupan-review-cockpit.netlify.app"
 $statusUrl = "http://127.0.0.1:8765/api/status"
-$expectedServiceVersion = "1.5.0"
+$expectedServiceVersion = "1.9.1"
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -49,22 +49,32 @@ function Get-ReviewServiceInfo {
 }
 
 function Test-ReviewService {
-    param([string]$Token)
+    param(
+        [string]$Token,
+        [bool]$ExpectedApiKeyConfigured
+    )
     $response = Get-ReviewServiceInfo -Token $Token
     return (
         $null -ne $response -and
         $response.ok -eq $true -and
-        $response.service_version -eq $expectedServiceVersion
+        $response.service_version -eq $expectedServiceVersion -and
+        $response.api_key_configured -eq $ExpectedApiKeyConfigured
     )
 }
 
 function Stop-OutdatedReviewService {
-    param([string]$Token)
+    param(
+        [string]$Token,
+        [bool]$ExpectedApiKeyConfigured
+    )
     $response = Get-ReviewServiceInfo -Token $Token
     if ($null -eq $response -or $response.ok -ne $true) {
         return
     }
-    if ($response.service_version -eq $expectedServiceVersion) {
+    if (
+        $response.service_version -eq $expectedServiceVersion -and
+        $response.api_key_configured -eq $ExpectedApiKeyConfigured
+    ) {
         return
     }
 
@@ -87,6 +97,15 @@ try {
     $pythonPath = Join-Path $backendDir ".venv\Scripts\python.exe"
     $requirementsPath = Join-Path $backendDir "requirements.txt"
     $tokenPath = Join-Path $backendDir "data\service_token.txt"
+    $envPath = Join-Path $backendDir ".env"
+    $expectedApiKeyConfigured = $false
+    if (Test-Path -LiteralPath $envPath) {
+        $expectedApiKeyConfigured = [bool](
+            Get-Content -LiteralPath $envPath -Encoding UTF8 |
+            Where-Object { $_ -match '^DEEPSEEK_API_KEY=\s*\S+' } |
+            Select-Object -First 1
+        )
+    }
 
     if (-not (Test-Path -LiteralPath $pythonPath)) {
         Write-Host "[Review Cockpit] Preparing the local environment..."
@@ -96,7 +115,7 @@ try {
         }
     }
 
-    & $pythonPath -c "import fastapi, uvicorn" 2>$null
+    & $pythonPath -c "import fastapi, uvicorn, fastembed" 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[Review Cockpit] Installing missing local components..."
         & $pythonPath -m pip install --timeout 30 -r $requirementsPath
@@ -106,10 +125,14 @@ try {
     }
 
     $token = Read-ServiceToken -TokenPath $tokenPath
-    $serviceReady = Test-ReviewService -Token $token
+    $serviceReady = Test-ReviewService `
+        -Token $token `
+        -ExpectedApiKeyConfigured $expectedApiKeyConfigured
 
     if (-not $serviceReady) {
-        Stop-OutdatedReviewService -Token $token
+        Stop-OutdatedReviewService `
+            -Token $token `
+            -ExpectedApiKeyConfigured $expectedApiKeyConfigured
         $serviceOutputLog = Join-Path $backendDir "data\service-output.log"
         $serviceErrorLog = Join-Path $backendDir "data\service-error.log"
         $arguments = @(
@@ -134,7 +157,10 @@ try {
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
             Start-Sleep -Milliseconds 500
             $token = Read-ServiceToken -TokenPath $tokenPath
-            if (Test-ReviewService -Token $token) {
+            if (Test-ReviewService `
+                -Token $token `
+                -ExpectedApiKeyConfigured $expectedApiKeyConfigured
+            ) {
                 $serviceReady = $true
                 break
             }

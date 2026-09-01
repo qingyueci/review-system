@@ -19,8 +19,14 @@ def test_kimi_client_uses_long_timeout_without_automatic_retry(monkeypatch) -> N
                     total_tokens=150,
                 ),
             )
+            def create(**kwargs):
+                captured["requested_model"] = kwargs["model"]
+                captured["thinking"] = kwargs["extra_body"]["thinking"]["type"]
+                captured["reasoning_effort"] = kwargs.get("reasoning_effort")
+                return completion
+
             self.chat = SimpleNamespace(
-                completions=SimpleNamespace(create=lambda **_kwargs: completion)
+                completions=SimpleNamespace(create=create)
             )
 
     monkeypatch.setattr(analysis_module, "OpenAI", FakeOpenAI)
@@ -39,11 +45,16 @@ def test_kimi_client_uses_long_timeout_without_automatic_retry(monkeypatch) -> N
         "test-key",
         "测试复盘",
         sources,
+        model="deepseek-v4-pro",
+        thinking_enabled=True,
         metrics=metrics,
     )
 
     assert result.startswith("# 今日核心判断")
     assert captured["timeout"] == 300
     assert captured["max_retries"] == 0
+    assert captured["requested_model"] == "deepseek-v4-pro"
+    assert captured["thinking"] == "enabled"
+    assert captured["reasoning_effort"] == "high"
     assert metrics["model"] == "kimi-test"
     assert metrics["usage"]["total_tokens"] == 150

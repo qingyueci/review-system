@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .analysis_parser import parse_analysis_sections, parse_task_table
 from .artifact_store import save_artifact
+from .config import AVAILABLE_MODELS, MODEL_NAME
 from .docx_export import generate_analysis_docx
 from .excel import generate_excel
 from .knowledge import KnowledgeStore
@@ -44,16 +45,26 @@ def _public_source(source: dict) -> dict:
     }
 
 
-def _call_with_metrics(function: Callable, *args, metrics: dict) -> Any:
-    parameters = inspect.signature(function).parameters.values()
-    accepts_metrics = any(
-        parameter.name == "metrics"
-        or parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
+def _call_model(
+    function: Callable,
+    *args,
+    model: str,
+    thinking_enabled: bool,
+    metrics: dict,
+) -> Any:
+    parameters = inspect.signature(function).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
     )
-    if accepts_metrics:
-        return function(*args, metrics=metrics)
-    return function(*args)
+    kwargs = {}
+    if "model" in parameters or accepts_kwargs:
+        kwargs["model"] = model
+    if "thinking_enabled" in parameters or accepts_kwargs:
+        kwargs["thinking_enabled"] = thinking_enabled
+    if "metrics" in parameters or accepts_kwargs:
+        kwargs["metrics"] = metrics
+    return function(*args, **kwargs)
 
 
 def _error_type(message: str) -> str:
@@ -70,6 +81,8 @@ def _error_type(message: str) -> str:
 
 def _generate_excel_artifact(
     api_key: str,
+    model: str,
+    thinking_enabled: bool,
     review_text: str,
     review_date: str,
     document_dir: Path,
@@ -78,7 +91,14 @@ def _generate_excel_artifact(
 ) -> dict:
     """沿用原 Excel 解析与排版链路，不改变既有工作簿格式。"""
     data = validate_data(
-        _call_with_metrics(parse_excel, api_key, review_text, metrics=metrics)
+        _call_model(
+            parse_excel,
+            api_key,
+            review_text,
+            model=model,
+            thinking_enabled=thinking_enabled,
+            metrics=metrics,
+        )
     )
     if review_date:
         data["meta"]["date"] = review_date
@@ -91,6 +111,8 @@ def _generate_excel_artifact(
 
 def _generate_word_artifact(
     api_key: str,
+    model: str,
+    thinking_enabled: bool,
     review_text: str,
     sources: list[dict],
     review_date: str,
@@ -98,11 +120,13 @@ def _generate_word_artifact(
     analyze_word: WordAnalyzer,
     metrics: dict,
 ) -> dict:
-    analysis = _call_with_metrics(
+    analysis = _call_model(
         analyze_word,
         api_key,
         review_text,
         sources,
+        model=model,
+        thinking_enabled=thinking_enabled,
         metrics=metrics,
     )
     document, filename = generate_analysis_docx(
@@ -133,7 +157,10 @@ def generate_review_outputs(
         raise ValueError("至少选择生成 Excel 或 Word 中的一项")
 
     review_text = preprocess_text(extract_review_text(payload))
-    api_key = payload.api_key.strip() or os.getenv("KIMI_API_KEY", "").strip()
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    model = payload.model.strip() or MODEL_NAME
+    if model not in AVAILABLE_MODELS:
+        raise ValueError(f"模型不在本机允许列表中：{model}")
     sources: list[dict] = []
     if payload.generate_word:
         with KnowledgeStore() as store:
@@ -162,12 +189,14 @@ def generate_review_outputs(
         }
     elif payload.generate_excel:
         runners["excel"] = lambda: _generate_excel_artifact(
-            api_key, review_text, payload.review_date, document_dir, parse_excel,
+            api_key, model, payload.thinking_enabled, review_text,
+            payload.review_date, document_dir, parse_excel,
             branch_runtime["excel"]["metrics"],
         )
     if payload.generate_word:
         runners["word"] = lambda: _generate_word_artifact(
-            api_key, review_text, sources, payload.review_date, document_dir,
+            api_key, model, payload.thinking_enabled, review_text, sources,
+            payload.review_date, document_dir,
             analyze_word, branch_runtime["word"]["metrics"],
         )
 
@@ -179,6 +208,9 @@ def generate_review_outputs(
         "analysis": "",
         "sections": {},
         "tasks": [],
+        "source_text": review_text,
+        "source_title": payload.source_title.strip() or payload.filename,
+        "source_url": payload.source_url.strip(),
         "sources": [_public_source(source) for source in sources],
         "document_base64": "",
         "document_filename": "",

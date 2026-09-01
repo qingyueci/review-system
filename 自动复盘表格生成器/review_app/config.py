@@ -3,12 +3,27 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
-API_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.kimi.com/coding/v1")
-MODEL_NAME = os.getenv("KIMI_MODEL", "kimi-for-coding")
-API_TIMEOUT_SECONDS = float(os.getenv("KIMI_TIMEOUT", "300"))
-API_MAX_RETRIES = int(os.getenv("KIMI_MAX_RETRIES", "0"))
+API_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+AVAILABLE_MODELS = tuple(
+    dict.fromkeys(
+        [
+            MODEL_NAME,
+            *(
+                model.strip()
+                for model in os.getenv(
+                    "DEEPSEEK_MODELS",
+                    "deepseek-v4-flash,deepseek-v4-pro",
+                ).split(",")
+                if model.strip()
+            ),
+        ]
+    )
+)
+API_TIMEOUT_SECONDS = float(os.getenv("DEEPSEEK_TIMEOUT", "300"))
+API_MAX_RETRIES = int(os.getenv("DEEPSEEK_MAX_RETRIES", "0"))
 MAX_INPUT_CHARS = 100_000
 
 AUTHOR_ID = os.getenv("TGB_AUTHOR_ID", "5894557")

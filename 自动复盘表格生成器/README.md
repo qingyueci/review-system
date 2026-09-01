@@ -2,7 +2,7 @@
 
 本地复盘工具，包含四条功能链路：
 
-1. 自动抓取延边刺客指定日期的公开复盘，调用 Kimi Code 生成单工作表 Excel。
+1. 自动抓取延边刺客指定日期的公开复盘，调用 DeepSeek 生成单工作表 Excel。
 2. 首次建立时扫描最近一年公开主帖并固定前 20 篇；之后只增量维护近期 10 篇，建立持续积累的本地 RAG 知识库。
 3. 同一份清洗后的每日复盘会并行进入两条独立链路：原格式 Excel 完整整理，以及按“首板出身—个股任务—布局关系—地位变化”生成 Word 核心分析。
 4. 自动读取上一级目录中的 `延边刺客短线打板体系.docx`，清洗、分段后作为人工整理体系加入 RAG。
@@ -22,7 +22,7 @@ Copy-Item .env.example .env
 
 1. 在“知识库”页面点击“增量更新近期 10 篇”；首次使用会同时建立固定核心 20 篇。
 2. 在“今日复盘”页面选择日期，点击“获取该日公开复盘”。
-3. 填写 Kimi Code API Key，选择“同时生成 / 只生成 Excel / 只生成 Word”。
+3. 在本机 `.env` 填写 DeepSeek API Key，网站选择模型和“同时生成 / 只生成 Excel / 只生成 Word”。
 4. 两个结果会分别保存；任一链路因额度或网络失败时，另一条成功结果仍会保留。
 5. 失败项可以单独重试，不会重复调用已经成功的模型链路。
 6. 相同复盘仍在生成时，重复点击会自动接回原任务，不会再次调用模型。
@@ -60,10 +60,12 @@ Copy-Item .env.example .env
 
 ## 配置
 
-- `KIMI_API_KEY`：必填，也可在页面临时填写。
-- `KIMI_BASE_URL`：默认 `https://api.kimi.com/coding/v1`。
-- `KIMI_MODEL`：默认 `kimi-for-coding`。
-- `KIMI_TIMEOUT`：模型请求超时秒数，默认 300。
+- `DEEPSEEK_API_KEY`：必填，也可在页面临时填写。
+- `DEEPSEEK_BASE_URL`：默认 `https://api.deepseek.com`。
+- `DEEPSEEK_MODEL`：默认 `deepseek-v4-flash`。
+- `DEEPSEEK_MODELS`：网站可选模型列表，使用英文逗号分隔，默认 `deepseek-v4-flash,deepseek-v4-pro`。
+- 网站模型标签为 Fast / Pro，并可独立开启或关闭深度思考；开启时使用 `thinking.type=enabled` 与高推理强度。
+- `DEEPSEEK_TIMEOUT`：模型请求超时秒数，默认 300。
 - `TGB_TIMEOUT`：网页请求超时秒数，默认 20。
 - `TGB_INTERVAL`：两次网页请求的最小间隔，默认 0.35 秒。
 - `TGB_MAX_RETRIES`：网页请求重试次数，默认 3。
@@ -91,7 +93,7 @@ API 密钥只从环境变量或密码输入框读取，不写入 Excel、Word �
 
 模型供应商未返回 token 用量时，页面会明确显示“供应商未返回”，不会估算或伪造消耗。
 
-知识库与 API Key 不会上传到站点。若 `.env` 未配置 `KIMI_API_KEY`，可在驾驶舱中临时填写，密钥只会发送给本机服务。
+知识库与 API Key 不会上传到站点。`DEEPSEEK_API_KEY` 只在本机 `.env` 中配置；网站只接收本机服务返回的模型名称列表，不读取或传输密钥。
 
 ## 代码结构
 

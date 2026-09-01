@@ -16,12 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from .analysis import analyze_with_rag
 from .analysis_parser import parse_analysis_sections, parse_task_table
 from .artifact_store import list_artifacts, resolve_artifact
-from .config import DATA_DIR, PROJECT_DIR
+from .config import AVAILABLE_MODELS, DATA_DIR, MODEL_NAME, PROJECT_DIR
 from .crawler import TgbCrawler
+from .dragon.router import create_dragon_router
 from .generation_service import generate_review_outputs
 from .job_store import JobStore
 from .knowledge import KnowledgeStore, sync_knowledge_incremental
-from .llm import parse_with_kimi
+from .llm import parse_with_deepseek
 from .preprocessing import preprocess_text
 from .review_input import extract_review_text
 from .schemas import AnalyzeRequest, FetchReviewRequest, RetryGenerationRequest
@@ -30,9 +31,9 @@ from .task_manager import TaskManager
 
 SITE_URL = os.getenv(
     "REVIEW_SITE_URL",
-    "https://fupan-cockpit.junxicai1.chatgpt.site",
+    "https://fupan-review-cockpit.netlify.app",
 ).rstrip("/")
-SERVICE_VERSION = "1.5.0"
+SERVICE_VERSION = "1.9.1"
 TOKEN_PATH = DATA_DIR / "service_token.txt"
 DOCUMENT_DIR = PROJECT_DIR / "output"
 
@@ -74,7 +75,7 @@ def _normalize_analysis_request(payload: AnalyzeRequest) -> AnalyzeRequest:
 
 
 def _persistable_request(payload: AnalyzeRequest) -> dict[str, Any]:
-    return payload.model_dump(exclude={"api_key", "content_base64"})
+    return payload.model_dump(exclude={"content_base64"})
 
 
 def _analysis_fingerprint(payload: AnalyzeRequest) -> str:
@@ -85,6 +86,8 @@ def _analysis_fingerprint(payload: AnalyzeRequest) -> str:
         "generate_excel": payload.generate_excel,
         "generate_word": payload.generate_word,
         "input_is_excel": payload.input_is_excel,
+        "model": payload.model or MODEL_NAME,
+        "thinking_enabled": payload.thinking_enabled,
     }
     encoded = json.dumps(
         value,
@@ -127,6 +130,9 @@ def _verify_token(value: str | None) -> None:
         raise HTTPException(status_code=401, detail="请从“启动复盘驾驶舱”打开站点")
 
 
+app.include_router(create_dragon_router(_verify_token))
+
+
 @app.get("/api/status")
 def status(x_review_token: str | None = Header(default=None)) -> dict:
     _verify_token(x_review_token)
@@ -136,7 +142,9 @@ def status(x_review_token: str | None = Header(default=None)) -> dict:
         "ok": True,
         "service_version": SERVICE_VERSION,
         "stats": stats,
-        "api_key_configured": bool(os.getenv("KIMI_API_KEY", "").strip()),
+        "api_key_configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
+        "available_models": list(AVAILABLE_MODELS),
+        "default_model": MODEL_NAME,
     }
 
 
@@ -168,7 +176,7 @@ def _analysis_result(payload: AnalyzeRequest, progress=None, branch_update=None)
     return generate_review_outputs(
         payload,
         document_dir=DOCUMENT_DIR,
-        parse_excel=parse_with_kimi,
+        parse_excel=parse_with_deepseek,
         analyze_word=analyze_with_rag,
         progress=progress,
         branch_update=branch_update,
@@ -252,7 +260,7 @@ def _run_sync(job_id: str) -> None:
         JOB_MANAGER.update(
             job_id,
             status="succeeded",
-            message="知识库更新完成",
+            message="知识库更新与语义清洗完成",
             result=result,
             stats=stats,
         )
@@ -455,7 +463,8 @@ def retry_generation(
     if branch_state.get("status") != "failed":
         raise HTTPException(status_code=400, detail="只能单独重试失败的生成项")
     request_payload.update(
-        api_key=payload.api_key,
+        model=payload.model or request_payload.get("model", MODEL_NAME),
+        thinking_enabled=payload.thinking_enabled,
         generate_excel=payload.branch == "excel",
         generate_word=payload.branch == "word",
     )
@@ -526,7 +535,7 @@ def start_sync(x_review_token: str | None = Header(default=None)) -> dict:
         {
             "kind": "sync",
             "status": "pending",
-            "message": "准备增量更新近期知识",
+            "message": "准备更新并语义清洗知识库",
             "current": 0,
             "total": 1,
         },

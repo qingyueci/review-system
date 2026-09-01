@@ -10,7 +10,7 @@ from .crawler import TgbCrawler
 from .docx_export import generate_analysis_docx
 from .excel import generate_excel
 from .knowledge import KnowledgeStore, sync_knowledge_incremental
-from .llm import parse_with_kimi
+from .llm import parse_with_deepseek
 from .preprocessing import preprocess_text
 from .validation import validate_data
 
@@ -55,7 +55,7 @@ def _render_review_page() -> None:
         if source_url:
             st.markdown(f"[查看原帖]({source_url})")
         api_key = st.text_input(
-            "Kimi Code API Key",
+            "DeepSeek API Key",
             type="password",
             placeholder="已配置环境变量时可留空",
             key="review_api_key",
@@ -65,7 +65,7 @@ def _render_review_page() -> None:
             try:
                 with st.spinner("正在解析并生成 Excel..."):
                     cleaned = preprocess_text(raw_text)
-                    data = validate_data(parse_with_kimi(api_key or os.getenv("KIMI_API_KEY", ""), cleaned))
+                    data = validate_data(parse_with_deepseek(api_key or os.getenv("DEEPSEEK_API_KEY", ""), cleaned))
                     content, filename = generate_excel(data)
                     st.session_state.update(
                         review_data=data,
@@ -203,7 +203,7 @@ def _render_analysis_page() -> None:
                 st.error(str(exc))
 
     api_key = st.text_input(
-        "Kimi Code API Key",
+        "DeepSeek API Key",
         type="password",
         placeholder="已配置环境变量时可留空",
         key="analysis_api_key",
@@ -216,7 +216,7 @@ def _render_analysis_page() -> None:
                 sources = store.search(review_text, limit=12)
             with st.spinner("正在检索历史资料并分析个股任务..."):
                 analysis = analyze_with_rag(
-                    api_key or os.getenv("KIMI_API_KEY", ""),
+                    api_key or os.getenv("DEEPSEEK_API_KEY", ""),
                     review_text,
                     sources,
                 )

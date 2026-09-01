@@ -8,6 +8,7 @@ from typing import Callable
 
 from docx import Document
 import jieba
+import numpy as np
 
 from .cleaning import content_hash, normalize_text, split_chunks
 from .config import CRAWL_TOP_POST_LIMIT, KNOWLEDGE_DB_PATH, MANUAL_SYSTEM_DOCX
@@ -21,6 +22,10 @@ STOP_WORDS = {
     "市场", "个股", "板块", "老师", "刺大", "发财",
 }
 CRAWL_PIPELINE_VERSION = 3
+SEMANTIC_MODEL = "BAAI/bge-small-zh-v1.5"
+SEMANTIC_INDEX_VERSION = "answer-v1"
+SEMANTIC_SAME_POST_THRESHOLD = 0.91
+SEMANTIC_CROSS_POST_THRESHOLD = 0.94
 SOURCE_WEIGHTS = {
     "qa": 1.0,
     "post": 0.9,
@@ -41,6 +46,13 @@ CONCEPT_TERMS = {
     "竞价确认": ("竞价", "确认", "预期", "开盘"),
     "失败条件": ("失败", "失效", "证伪", "不及预期"),
 }
+
+_EMBEDDING_MODELS: dict[str, object] = {}
+_OPPOSITE_TERMS = (
+    ("上涨", "下跌"), ("涨", "跌"), ("买", "卖"), ("强", "弱"),
+    ("看多", "看空"), ("成功", "失败"), ("加仓", "减仓"),
+)
+_NEGATION_TERMS = ("不是", "没有", "不能", "不应", "别", "未", "无", "避免", "禁止")
 
 
 def _tokens(value: str, *, maximum: int = 80) -> list[str]:
@@ -111,6 +123,39 @@ def _topic_score(query_features: Counter, content_features: Counter) -> float:
     return len(query_concepts & set(content_features)) / len(query_concepts)
 
 
+def _embedding_model(model_name: str = SEMANTIC_MODEL):
+    """按需载入本地 ONNX 模型；平时检索不启动模型。"""
+    if model_name not in _EMBEDDING_MODELS:
+        from fastembed import TextEmbedding
+
+        cache_dir = KNOWLEDGE_DB_PATH.parent / "fastembed_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        _EMBEDDING_MODELS[model_name] = TextEmbedding(
+            model_name=model_name,
+            cache_dir=str(cache_dir),
+        )
+    return _EMBEDDING_MODELS[model_name]
+
+
+def _semantic_text(row: sqlite3.Row | dict) -> str:
+    return normalize_text(row["answer"])
+
+
+def _semantically_compatible(left: str, right: str) -> bool:
+    """数字、否定和相反方向不一致时禁止合并。"""
+    left_numbers = set(re.findall(r"\d+(?:\.\d+)?%?", left))
+    right_numbers = set(re.findall(r"\d+(?:\.\d+)?%?", right))
+    if left_numbers != right_numbers and (left_numbers or right_numbers):
+        return False
+    for term in _NEGATION_TERMS:
+        if (term in left) != (term in right):
+            return False
+    for positive, negative in _OPPOSITE_TERMS:
+        if (positive in left and negative in right) or (negative in left and positive in right):
+            return False
+    return True
+
+
 class KnowledgeStore:
     def __init__(self, path=KNOWLEDGE_DB_PATH) -> None:
         self.path = path
@@ -163,6 +208,11 @@ class KnowledgeStore:
                 likes INTEGER NOT NULL DEFAULT 0,
                 source_url TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                is_retrievable INTEGER NOT NULL DEFAULT 1,
+                duplicate_of TEXT NOT NULL DEFAULT '',
+                similarity_score REAL NOT NULL DEFAULT 0,
+                semantic_group_id TEXT NOT NULL DEFAULT '',
+                dedupe_reason TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(post_url) REFERENCES posts(url) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS chunks (
@@ -196,6 +246,18 @@ class KnowledgeStore:
                 content TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS qa_embeddings (
+                reply_id TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         existing_columns = {
             row["name"] for row in self.connection.execute("PRAGMA table_info(posts)").fetchall()
@@ -213,6 +275,21 @@ class KnowledgeStore:
             self.connection.execute(
                 "ALTER TABLE posts ADD COLUMN capture_mode TEXT NOT NULL DEFAULT 'public_http'"
             )
+        qa_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(qa_pairs)").fetchall()
+        }
+        qa_migrations = {
+            "is_retrievable": "INTEGER NOT NULL DEFAULT 1",
+            "duplicate_of": "TEXT NOT NULL DEFAULT ''",
+            "similarity_score": "REAL NOT NULL DEFAULT 0",
+            "semantic_group_id": "TEXT NOT NULL DEFAULT ''",
+            "dedupe_reason": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in qa_migrations.items():
+            if name not in qa_columns:
+                self.connection.execute(
+                    f"ALTER TABLE qa_pairs ADD COLUMN {name} {definition}"
+                )
         try:
             self.connection.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
@@ -298,6 +375,11 @@ class KnowledgeStore:
                     post.get("capture_mode", "public_http"),
                     CRAWL_PIPELINE_VERSION,
                 ),
+            )
+            self.connection.execute(
+                "DELETE FROM qa_embeddings WHERE reply_id IN "
+                "(SELECT reply_id FROM qa_pairs WHERE post_url = ?)",
+                (post["url"],),
             )
             self.connection.execute("DELETE FROM qa_pairs WHERE post_url = ?", (post["url"],))
             self.connection.execute("DELETE FROM chunks WHERE post_url = ?", (post["url"],))
@@ -593,6 +675,232 @@ class KnowledgeStore:
             per_post[row["post_url"]] += 1
         return selected
 
+    def semantic_clean_qa(
+        self,
+        progress: Callable[[str, int, int], None] | None = None,
+        *,
+        model_name: str = SEMANTIC_MODEL,
+    ) -> dict:
+        """保留全部原始回复，只让每个语义组的代表回复进入检索层。"""
+        rows = self.connection.execute(
+            """
+            SELECT q.*, p.title AS post_title, p.published_at AS post_published_at
+            FROM qa_pairs q
+            JOIN posts p ON p.url = q.post_url
+            ORDER BY q.published_at DESC, q.floor DESC
+            """
+        ).fetchall()
+        total = len(rows)
+        cleaned_at = datetime.now().isoformat(timespec="seconds")
+        cache_model = f"{model_name}:{SEMANTIC_INDEX_VERSION}"
+        if not rows:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO knowledge_meta(key, value) VALUES('semantic_model', ?)",
+                    (model_name,),
+                )
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO knowledge_meta(key, value) VALUES('semantic_cleaned_at', ?)",
+                    (cleaned_at,),
+                )
+            return {
+                "original": 0,
+                "retrievable": 0,
+                "duplicates": 0,
+                "model": model_name,
+                "cleaned_at": cleaned_at,
+            }
+
+        cached = {
+            row["reply_id"]: row
+            for row in self.connection.execute(
+                "SELECT reply_id, content_hash, dimensions, vector FROM qa_embeddings WHERE model = ?",
+                (cache_model,),
+            ).fetchall()
+        }
+        vectors: list[np.ndarray | None] = [None] * total
+        missing_indices: list[int] = []
+        for index, row in enumerate(rows):
+            stored = cached.get(row["reply_id"])
+            if stored and stored["content_hash"] == row["content_hash"]:
+                vector = np.frombuffer(stored["vector"], dtype=np.float32)
+                if vector.size == stored["dimensions"]:
+                    vectors[index] = vector
+                    continue
+            missing_indices.append(index)
+
+        if missing_indices:
+            if progress:
+                progress("正在载入本地语义模型", 0, total)
+            model = _embedding_model(model_name)
+            texts = [_semantic_text(rows[index]) for index in missing_indices]
+            generated = model.embed(texts, batch_size=64)
+            inserts = []
+            for completed, (index, vector) in enumerate(
+                zip(missing_indices, generated, strict=True), 1
+            ):
+                normalized = np.asarray(vector, dtype=np.float32)
+                norm = float(np.linalg.norm(normalized))
+                if norm:
+                    normalized /= norm
+                vectors[index] = normalized
+                row = rows[index]
+                inserts.append(
+                    (
+                        row["reply_id"], cache_model, row["content_hash"],
+                        int(normalized.size), normalized.tobytes(), cleaned_at,
+                    )
+                )
+                if progress and (completed % 256 == 0 or completed == len(missing_indices)):
+                    progress(
+                        f"正在生成本地语义索引 {completed}/{len(missing_indices)}",
+                        completed,
+                        len(missing_indices),
+                    )
+            with self.connection:
+                self.connection.executemany(
+                    """
+                    INSERT OR REPLACE INTO qa_embeddings(
+                        reply_id, model, content_hash, dimensions, vector, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    inserts,
+                )
+
+        matrix = np.vstack([vector for vector in vectors if vector is not None]).astype(
+            np.float32, copy=False
+        )
+        if len(matrix) != total:
+            raise RuntimeError("本地语义向量生成不完整，请重新执行")
+
+        def quality(index: int) -> tuple[float, str, int]:
+            row = rows[index]
+            score = len(normalize_text(row["answer"])) + min(int(row["likes"]), 30) * 8
+            score += min(len(normalize_text(row["question"])), 120) * 0.25
+            return score, row["published_at"], int(row["floor"])
+
+        order = sorted(range(total), key=quality, reverse=True)
+        representatives = np.empty_like(matrix)
+        representative_indices: list[int] = []
+        representative_count = 0
+        assignments: list[tuple[int, str, float, str, str] | None] = [None] * total
+        exact_representatives: dict[str, int] = {}
+
+        for completed, index in enumerate(order, 1):
+            row = rows[index]
+            text = _semantic_text(row)
+            matched_rep_position: int | None = None
+            similarity = 0.0
+            reason = "代表回复"
+            exact_position = exact_representatives.get(row["content_hash"])
+            if exact_position is not None:
+                matched_rep_position = exact_position
+                similarity = 1.0
+                reason = "文本重复"
+            elif representative_count:
+                scores = representatives[:representative_count] @ matrix[index]
+                candidates = np.flatnonzero(scores >= SEMANTIC_SAME_POST_THRESHOLD)
+                for position in candidates[np.argsort(scores[candidates])[::-1]]:
+                    rep_index = representative_indices[int(position)]
+                    rep_row = rows[rep_index]
+                    shorter_length = min(
+                        len(normalize_text(row["answer"])),
+                        len(normalize_text(rep_row["answer"])),
+                    )
+                    if shorter_length < 12:
+                        continue
+                    threshold = (
+                        SEMANTIC_SAME_POST_THRESHOLD
+                        if row["post_url"] == rep_row["post_url"]
+                        else SEMANTIC_CROSS_POST_THRESHOLD
+                    )
+                    score = float(scores[position])
+                    if score < threshold:
+                        continue
+                    if not _semantically_compatible(text, _semantic_text(rep_row)):
+                        continue
+                    matched_rep_position = int(position)
+                    similarity = score
+                    reason = "语义相近"
+                    break
+
+            if matched_rep_position is None:
+                position = representative_count
+                representatives[position] = matrix[index]
+                representative_indices.append(index)
+                representative_count += 1
+                exact_representatives.setdefault(row["content_hash"], position)
+                assignments[index] = (1, "", 0.0, row["reply_id"], reason)
+            else:
+                rep_index = representative_indices[matched_rep_position]
+                rep_id = rows[rep_index]["reply_id"]
+                assignments[index] = (0, rep_id, round(similarity, 6), rep_id, reason)
+
+            if progress and (completed % 256 == 0 or completed == total):
+                progress(f"正在合并语义相近回复 {completed}/{total}", completed, total)
+
+        updates = [
+            (*assignment, rows[index]["reply_id"])
+            for index, assignment in enumerate(assignments)
+            if assignment is not None
+        ]
+        with self.connection:
+            self.connection.executemany(
+                """
+                UPDATE qa_pairs
+                SET is_retrievable = ?, duplicate_of = ?, similarity_score = ?,
+                    semantic_group_id = ?, dedupe_reason = ?
+                WHERE reply_id = ?
+                """,
+                updates,
+            )
+            self.connection.execute("DELETE FROM chunks WHERE source_type='qa'")
+            representative_rows = self.connection.execute(
+                """
+                SELECT q.*, p.title AS post_title, p.published_at AS post_published_at
+                FROM qa_pairs q JOIN posts p ON p.url = q.post_url
+                WHERE q.is_retrievable = 1
+                """
+            ).fetchall()
+            for row in representative_rows:
+                question = normalize_text(row["question"])
+                answer = normalize_text(row["answer"])
+                content = (
+                    f"用户问题：{question}\n刺大回复：{answer}"
+                    if question else f"刺大评论：{answer}"
+                )
+                self._insert_chunk(
+                    "qa",
+                    row["reply_id"],
+                    {
+                        "url": row["post_url"],
+                        "title": row["post_title"],
+                        "published_at": row["published_at"] or row["post_published_at"],
+                    },
+                    content,
+                    row["source_url"],
+                    0,
+                )
+            self.connection.execute(
+                "INSERT OR REPLACE INTO knowledge_meta(key, value) VALUES('semantic_model', ?)",
+                (model_name,),
+            )
+            self.connection.execute(
+                "INSERT OR REPLACE INTO knowledge_meta(key, value) VALUES('semantic_cleaned_at', ?)",
+                (cleaned_at,),
+            )
+            self.connection.execute(
+                "DELETE FROM qa_embeddings WHERE reply_id NOT IN (SELECT reply_id FROM qa_pairs)"
+            )
+        self.rebuild_fts()
+        return {
+            "original": total,
+            "retrievable": representative_count,
+            "duplicates": total - representative_count,
+            "model": model_name,
+            "cleaned_at": cleaned_at,
+        }
+
     def stats(self) -> dict:
         post_count = self.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
         core_count = self.connection.execute(
@@ -605,6 +913,12 @@ class KnowledgeStore:
             "SELECT COUNT(*) FROM posts WHERE scope='recent_archive'"
         ).fetchone()[0]
         qa_count = self.connection.execute("SELECT COUNT(*) FROM qa_pairs").fetchone()[0]
+        retrievable_qa_count = self.connection.execute(
+            "SELECT COUNT(*) FROM qa_pairs WHERE is_retrievable = 1"
+        ).fetchone()[0]
+        semantic_duplicate_count = self.connection.execute(
+            "SELECT COUNT(*) FROM qa_pairs WHERE is_retrievable = 0"
+        ).fetchone()[0]
         community_count = self.connection.execute(
             "SELECT COUNT(*) FROM chunks WHERE source_type='community'"
         ).fetchone()[0]
@@ -618,12 +932,22 @@ class KnowledgeStore:
         last_run = self.connection.execute(
             "SELECT finished_at FROM crawl_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        semantic_meta = {
+            row["key"]: row["value"]
+            for row in self.connection.execute(
+                "SELECT key, value FROM knowledge_meta WHERE key IN ('semantic_model', 'semantic_cleaned_at')"
+            ).fetchall()
+        }
         return {
             "posts": post_count,
             "core_posts": core_count,
             "supplemental_posts": supplemental_count,
             "archived_posts": archived_count,
             "qa_pairs": qa_count,
+            "retrievable_qa": retrievable_qa_count,
+            "semantic_duplicates": semantic_duplicate_count,
+            "semantic_model": semantic_meta.get("semantic_model", SEMANTIC_MODEL),
+            "semantic_cleaned_at": semantic_meta.get("semantic_cleaned_at", "尚未清洗"),
             "community_comments": community_count,
             "manual_sources": manual_source_count,
             "manual_chunks": manual_chunk_count,
@@ -733,6 +1057,7 @@ def sync_knowledge_incremental(
             result["manual_source"] = store.import_manual_docx()
         except RuntimeError as exc:
             result["manual_source"] = {"imported": False, "error": str(exc)}
+        result["semantic_clean"] = store.semantic_clean_qa(progress)
         result["finished_at"] = datetime.now().isoformat(timespec="seconds")
         store.record_run(result)
         return result

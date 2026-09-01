@@ -90,10 +90,12 @@ def analyze_with_rag(
     review_text: str,
     sources: list[dict],
     *,
+    model: str = MODEL_NAME,
+    thinking_enabled: bool = True,
     metrics: dict[str, Any] | None = None,
 ) -> str:
     if not api_key.strip():
-        raise ValueError("请填写 Kimi Code API Key，或设置 KIMI_API_KEY 环境变量")
+        raise ValueError("请填写 DeepSeek API Key，或设置 DEEPSEEK_API_KEY 环境变量")
     if not review_text.strip():
         raise ValueError("没有可分析的每日复盘内容")
     if not sources:
@@ -115,34 +117,45 @@ def analyze_with_rag(
 
 请严格按照系统规定的“首板出身—任务—布局关系—地位—完成/失败”顺序分析。"""
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
+        request_options = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=1.0,
+            "extra_body": {
+                "thinking": {
+                    "type": "enabled" if thinking_enabled else "disabled",
+                },
+            },
+        }
+        if thinking_enabled:
+            request_options["reasoning_effort"] = "high"
+        else:
+            request_options["temperature"] = 1.0
+        response = client.chat.completions.create(
+            **request_options,
         )
     except APITimeoutError as exc:
         minutes = max(1, round(API_TIMEOUT_SECONDS / 60))
         raise RuntimeError(
-            f"Kimi Code 在 {minutes} 分钟内没有返回完整分析，本次任务已停止，请稍后重试"
+            f"DeepSeek 在 {minutes} 分钟内没有返回完整分析，本次任务已停止，请稍后重试"
         ) from exc
     except APIConnectionError as exc:
-        raise RuntimeError("无法连接 Kimi Code API，请检查网络或 KIMI_BASE_URL") from exc
+        raise RuntimeError("无法连接 DeepSeek API，请检查网络或 DEEPSEEK_BASE_URL") from exc
     except APIStatusError as exc:
         detail = getattr(exc, "message", str(exc))
         if exc.status_code in {429, 499}:
             raise RuntimeError(
-                f"Kimi Code 当前额度不足或服务限流（HTTP {exc.status_code}），请等待额度恢复后重试"
+                f"DeepSeek 当前额度不足或服务限流（HTTP {exc.status_code}），请等待额度恢复后重试"
             ) from exc
         if exc.status_code in {401, 403}:
             raise RuntimeError(
-                f"Kimi Code 密钥无效或没有模型权限（HTTP {exc.status_code}）"
+                f"DeepSeek 密钥无效或没有模型权限（HTTP {exc.status_code}）"
             ) from exc
-        raise RuntimeError(f"Kimi Code API 返回错误（HTTP {exc.status_code}）：{detail}") from exc
+        raise RuntimeError(f"DeepSeek API 返回错误（HTTP {exc.status_code}）：{detail}") from exc
     content = response.choices[0].message.content if response.choices else None
     if not content:
-        raise RuntimeError("Kimi Code 返回了空分析")
+        raise RuntimeError("DeepSeek 返回了空分析")
     capture_model_metrics(response, metrics)
     return content.strip()
