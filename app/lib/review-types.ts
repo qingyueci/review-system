@@ -5,6 +5,10 @@ export type Stats = {
   supplemental_posts: number;
   archived_posts: number;
   qa_pairs: number;
+  retrievable_qa: number;
+  semantic_duplicates: number;
+  semantic_model: string;
+  semantic_cleaned_at: string;
   community_comments: number;
   manual_chunks: number;
   chunks: number;
@@ -36,6 +40,9 @@ export type AnalysisResult = {
   analysis: string;
   sections: Record<string, string>;
   tasks: AnalysisTask[];
+  source_text: string;
+  source_title: string;
+  source_url: string;
   sources: Source[];
   document_base64: string;
   document_filename: string;

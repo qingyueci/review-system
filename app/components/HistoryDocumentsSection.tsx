@@ -150,7 +150,7 @@ export function HistoryDocumentsSection({
         ) : (
           <div className="page-empty compact">
             <h3>还没有运行记录</h3>
-            <p>下一次生成后，这里会显示两条链路的耗时、引用和失败原因。</p>
+          <p>下一次生成后，这里会显示两条链路的耗时、引用和失败原因；失败分支支持降级归档。</p>
           </div>
         )}
       </section>

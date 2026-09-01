@@ -9,8 +9,11 @@ type Props = {
   crawledText: string;
   crawledSource: string;
   apiKeyConfigured: boolean;
-  apiKey: string;
-  onApiKeyChange: (value: string) => void;
+  availableModels: string[];
+  selectedModel: string;
+  onModelChange: (value: string) => void;
+  thinkingEnabled: boolean;
+  onThinkingEnabledChange: (value: boolean) => void;
   actionMessage: string;
   isAnalyzing: boolean;
   generationMode: GenerationMode;
@@ -32,8 +35,11 @@ export function TodayReviewSection({
   crawledText,
   crawledSource,
   apiKeyConfigured,
-  apiKey,
-  onApiKeyChange,
+  availableModels,
+  selectedModel,
+  onModelChange,
+  thinkingEnabled,
+  onThinkingEnabledChange,
   actionMessage,
   isAnalyzing,
   generationMode,
@@ -75,21 +81,40 @@ export function TodayReviewSection({
               </a>
             )}
           </div>
-          {!apiKeyConfigured && (
-            <label className="api-key-field">
-              <span>Kimi Code Key</span>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(event) => onApiKeyChange(event.target.value)}
-                placeholder="只发送到 127.0.0.1"
-                autoComplete="off"
-              />
+          <div className="local-model-config">
+            <span className={apiKeyConfigured ? "key-ready" : "key-missing"}>
+              {apiKeyConfigured
+                ? "本机已配置 DeepSeek API Key"
+                : "请在本机 .env 填写 DEEPSEEK_API_KEY"}
+            </span>
+            <label className="api-key-field model-field">
+              <span>选择模型</span>
+              <select
+                value={selectedModel}
+                onChange={(event) => onModelChange(event.target.value)}
+                disabled={!availableModels.length || isAnalyzing}
+              >
+                {availableModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model === "deepseek-v4-flash"
+                      ? "Fast · DeepSeek V4 Flash"
+                      : model === "deepseek-v4-pro"
+                        ? "Pro · DeepSeek V4 Pro"
+                        : model}
+                  </option>
+                ))}
+              </select>
             </label>
-          )}
-          {apiKeyConfigured && (
-            <span className="key-ready">本机已配置模型密钥</span>
-          )}
+            <label className="thinking-toggle">
+              <input
+                type="checkbox"
+                checked={thinkingEnabled}
+                onChange={(event) => onThinkingEnabledChange(event.target.checked)}
+                disabled={isAnalyzing}
+              />
+              <span>开启深度思考</span>
+            </label>
+          </div>
         </div>
         {actionMessage && (
           <div className={`action-message ${isAnalyzing ? "working" : ""}`}>

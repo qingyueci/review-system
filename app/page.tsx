@@ -1,12 +1,17 @@
 "use client";
 
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 
 import { AnalysisSection } from "./components/AnalysisSection";
+import {
+  DragonSection,
+  type DragonGeneratedReview,
+} from "./components/DragonSection";
 import { HistoryDocumentsSection } from "./components/HistoryDocumentsSection";
 import { KnowledgeSection } from "./components/KnowledgeSection";
 import { TodayReviewSection } from "./components/TodayReviewSection";
 import {
+  API_BASE,
   BranchState,
   Job,
   PersistedJob,
@@ -37,13 +42,17 @@ const emptyStats: Stats = {
   supplemental_posts: 10,
   archived_posts: 0,
   qa_pairs: 4306,
+  retrievable_qa: 4306,
+  semantic_duplicates: 0,
+  semantic_model: "BAAI/bge-small-zh-v1.5",
+  semantic_cleaned_at: "尚未清洗",
   community_comments: 342,
   manual_chunks: 14,
   chunks: 4723,
   last_sync: "等待连接本机服务",
 };
 
-const navItems = ["今日复盘", "布局分析", "知识库", "历史文档"];
+const navItems = ["今日复盘", "布局分析", "知识库", "历史文档", "首板布局"];
 
 function todayText() {
   const now = new Date();
@@ -104,8 +113,9 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
         };
       })
     : [];
-  const rawBranches =
-    raw.branches && typeof raw.branches === "object" ? raw.branches : {};
+  const rawBranches = (
+    raw.branches && typeof raw.branches === "object" ? raw.branches : {}
+  ) as Partial<Record<"excel" | "word", Partial<BranchState>>>;
   const normalizeBranch = (
     name: "excel" | "word",
     ready: boolean,
@@ -129,6 +139,9 @@ function normalizeAnalysisResult(value: unknown): AnalysisResult {
     analysis: asText(raw.analysis),
     sections,
     tasks,
+    source_text: asText(raw.source_text),
+    source_title: asText(raw.source_title),
+    source_url: asText(raw.source_url),
     sources,
     document_base64: asText(raw.document_base64),
     document_filename: documentFilename,
@@ -158,6 +171,9 @@ function mergeAnalysisResults(
         ? incoming.sections
         : previous.sections,
     tasks: incoming.tasks.length ? incoming.tasks : previous.tasks,
+    source_text: incoming.source_text || previous.source_text,
+    source_title: incoming.source_title || previous.source_title,
+    source_url: incoming.source_url || previous.source_url,
     sources: incoming.sources.length ? incoming.sources : previous.sources,
     document_base64:
       incoming.document_base64 || previous.document_base64,
@@ -174,6 +190,63 @@ function mergeAnalysisResults(
         : incoming.branches.word,
     },
     warnings: incoming.warnings,
+  };
+}
+
+function buildDragonGeneratedReview(
+  analysis: AnalysisResult | null,
+  tradeDate: string,
+  sourceUrl: string,
+  reviewText: string,
+  reviewTitle: string,
+): DragonGeneratedReview | undefined {
+  if (!analysis?.analysis.trim()) return undefined;
+  const section = (...names: string[]) =>
+    names.map((name) => analysis.sections[name]?.trim()).find(Boolean) ?? "";
+  const taskLines = analysis.tasks
+    .map((task) =>
+      [
+        `${task.stock}：${task.original_task}`,
+        task.current_position && `当前地位：${task.current_position}`,
+        task.relations && `协同/压制：${task.relations}`,
+        task.success_signal && `完成信号：${task.success_signal}`,
+      ]
+        .filter(Boolean)
+        .join("；"),
+    )
+    .join("\n");
+  const taskFailures = analysis.tasks
+    .filter((task) => task.failure_signal)
+    .map((task) => `${task.stock}：${task.failure_signal}`)
+    .join("\n");
+  return {
+    trade_date: tradeDate,
+    period_stage: section("周期阶段"),
+    market_core: section("今日核心判断"),
+    expectation_point: section("正向与负向辨识度"),
+    negative_feedback: section("复盘中的关键矛盾"),
+    effective_directions: section(
+      "题材之间的任务关系",
+      "布局总图",
+      "地位演化和相互确认",
+    ),
+    tomorrow_tasks:
+      taskLines || section("明日竞价确认条件", "个股任务表"),
+    failure_conditions:
+      section("判断失效条件") || taskFailures,
+    user_notes: section("地位演化和相互确认"),
+    source_text: [
+      `当日 API 复盘分析\n${analysis.analysis.trim()}`,
+      (reviewText || analysis.source_text).trim()
+        ? `刺大复盘原文\n${(reviewText || analysis.source_text).trim()}`
+        : "",
+    ].filter(Boolean).join("\n\n"),
+    source_title: (reviewText || analysis.source_text).trim()
+      ? `当日 API 复盘分析 + ${reviewTitle || analysis.source_title || "刺大复盘原文"}`
+      : analysis.document_filename
+        ? `布局分析生成结果 · ${analysis.document_filename}`
+        : `布局分析生成结果 · ${tradeDate}`,
+    source_url: sourceUrl || analysis.source_url,
   };
 }
 
@@ -196,13 +269,16 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const [stats, setStats] = useState<Stats>(emptyStats);
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
-  const [apiKey, setApiKey] = useState("");
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [generationMode, setGenerationMode] =
     useState<GenerationMode>("both");
   const [reviewDate, setReviewDate] = useState(todayText);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
   const [crawledText, setCrawledText] = useState("");
   const [crawledSource, setCrawledSource] = useState("");
+  const [crawledTitle, setCrawledTitle] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
@@ -228,6 +304,16 @@ export default function Home() {
     analysis?.document_filename || analysis?.excel_filename,
   );
   const evidence = analysis?.sources ?? [];
+  const dragonGeneratedReview = useMemo(
+    () => buildDragonGeneratedReview(
+      analysis,
+      reviewDate,
+      crawledSource,
+      crawledText,
+      crawledTitle,
+    ),
+    [analysis, reviewDate, crawledSource, crawledText, crawledTitle],
+  );
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -248,12 +334,16 @@ export default function Home() {
     requestLocal<{
       stats: Stats;
       api_key_configured: boolean;
+      available_models: string[];
+      default_model: string;
     }>(token, "/api/status")
       .then((result) => {
         if (cancelled) return;
         setConnected(true);
         setStats(result.stats);
         setApiKeyConfigured(result.api_key_configured);
+        setAvailableModels(result.available_models);
+        setSelectedModel((current) => current || result.default_model);
         return requestLocal<{ documents: HistoryDocument[] }>(
           token,
           "/api/documents",
@@ -378,6 +468,9 @@ export default function Home() {
         ? mergeAnalysisResults(analysis, incoming)
         : incoming;
     setAnalysis(result);
+    if (result.source_text) setCrawledText(result.source_text);
+    if (result.source_url) setCrawledSource(result.source_url);
+    if (result.source_title) setCrawledTitle(result.source_title);
     try {
       const history = await requestLocal<{ documents: HistoryDocument[] }>(
         token,
@@ -468,6 +561,7 @@ export default function Home() {
       const result = completed.result;
       setCrawledText(result.text);
       setCrawledSource(result.source_url);
+      setCrawledTitle(result.title);
       setReviewFile(null);
       setActionMessage("复盘正文已载入，可以开始 RAG 分析。");
       showNotice(`已自爬取「${result.title}」，无需手动复制。`);
@@ -489,8 +583,8 @@ export default function Home() {
       showNotice(message);
       return;
     }
-    if (!apiKeyConfigured && !apiKey.trim()) {
-      const message = "缺少 Kimi Code API Key：请在下方密码框填写后再分析。";
+    if (!apiKeyConfigured) {
+      const message = "本机尚未配置 DeepSeek API Key：请填写 .env 后重启本机服务。";
       setActiveNav("今日复盘");
       setActionMessage(message);
       showNotice(message);
@@ -510,8 +604,11 @@ export default function Home() {
             filename: reviewFile?.name || `${reviewDate}复盘.txt`,
             content_base64: contentBase64,
             text: crawledText,
+            source_title: crawledTitle || reviewFile?.name || `${reviewDate}刺大复盘原文`,
+            source_url: crawledSource,
             review_date: reviewDate,
-            api_key: apiKey,
+            model: selectedModel,
+            thinking_enabled: thinkingEnabled,
             generate_excel: generatesExcel,
             generate_word: generatesWord,
           }),
@@ -558,8 +655,8 @@ export default function Home() {
       showNotice("没有找到可重试的任务记录，请重新生成。");
       return;
     }
-    if (!apiKeyConfigured && !apiKey.trim()) {
-      const message = "缺少 Kimi Code API Key，无法重试失败项。";
+    if (!apiKeyConfigured) {
+      const message = "本机尚未配置 DeepSeek API Key，无法重试失败项。";
       setActionMessage(message);
       showNotice(message);
       return;
@@ -573,7 +670,11 @@ export default function Home() {
         `/api/jobs/${resultJobId}/retry`,
         {
         method: "POST",
-        body: JSON.stringify({ branch, api_key: apiKey }),
+        body: JSON.stringify({
+          branch,
+          model: selectedModel,
+          thinking_enabled: thinkingEnabled,
+        }),
         },
       );
       setResultJobId(started.job_id);
@@ -622,11 +723,11 @@ export default function Home() {
         "/api/sync",
         { method: "POST", body: "{}" },
       );
-      const completed = await waitForJob<unknown>(
+      const completed = (await waitForJob<unknown>(
         token,
         started.job_id,
         (job) => setSyncJob(job),
-      );
+      )) as Job & { stats?: Stats };
       if (completed.stats) {
         setStats(completed.stats);
         const refreshed = await requestLocal<{ posts: KnowledgePost[] }>(
@@ -634,7 +735,7 @@ export default function Home() {
           "/api/posts",
         );
         setKnowledgePosts(refreshed.posts);
-        showNotice("自爬取、清洗和知识库更新已完成。");
+        showNotice("知识库更新与语义清洗已完成。");
       } else {
         showNotice(completed.message || "知识库更新失败");
       }
@@ -700,16 +801,32 @@ export default function Home() {
           <div className={`knowledge-status ${connected ? "" : "offline"}`}>
             <span className="pulse-dot" />
             <div>
-              <strong>{connected ? "本机知识库已连接" : "本机服务未连接"}</strong>
-              <small>{connected ? `${stats.chunks.toLocaleString()} 条可检索证据` : "请从启动器打开"}</small>
+              <strong>
+                {connected
+                  ? activeNav === "首板布局"
+                    ? "首板模块本机服务已连接"
+                    : "本机知识库已连接"
+                  : "本机服务未连接"}
+              </strong>
+              <small>
+                {connected
+                  ? activeNav === "首板布局"
+                    ? "独立 dragon_knowledge.db / dragon_runtime.db"
+                    : `${stats.chunks.toLocaleString()} 条可检索证据`
+                  : "请从启动器打开"}
+              </small>
             </div>
           </div>
-          <button className="btn btn-secondary" disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>
-            {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "增量更新"}
-          </button>
-          <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
-            {isAnalyzing ? "正在生成…" : generationLabel}
-          </button>
+          {activeNav !== "首板布局" && (
+            <>
+              <button className="btn btn-secondary" disabled={Boolean(syncJob && syncJob.status !== "failed" && syncJob.status !== "succeeded")} onClick={handleSync}>
+                {syncJob?.status === "running" ? `更新中 ${syncJob.current}/${syncJob.total}` : "增量更新"}
+              </button>
+              <button className="btn btn-primary" disabled={isAnalyzing} onClick={handleAnalyze}>
+                {isAnalyzing ? "正在生成…" : generationLabel}
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -725,16 +842,34 @@ export default function Home() {
           </nav>
           <div className="sidebar-divider" />
           <div className="library-card">
-            <span className="eyebrow">RAG 知识构成</span>
-            <dl>
-              <div><dt>核心原帖</dt><dd>{stats.core_posts}</dd></div>
-              <div><dt>本人回复</dt><dd>{stats.qa_pairs.toLocaleString()}</dd></div>
-              <div><dt>社区精选</dt><dd>{stats.community_comments}</dd></div>
-              <div><dt>人工体系切片</dt><dd>{stats.manual_chunks}</dd></div>
-            </dl>
-            <div className="source-note">已纳入《延边刺客短线打板体系》</div>
+            {activeNav === "首板布局" ? (
+              <>
+                <span className="eyebrow">首板布局数据边界</span>
+                <dl>
+                  <div><dt>历史模型 RAG</dt><dd>独立</dd></div>
+                  <div><dt>规则与运行记录</dt><dd>独立</dd></div>
+                  <div><dt>当日复盘上下文</dt><dd>确认后</dd></div>
+                </dl>
+                <div className="source-note">不读取 review_knowledge.db</div>
+              </>
+            ) : (
+              <>
+                <span className="eyebrow">RAG 知识构成</span>
+                <dl>
+                  <div><dt>核心原帖</dt><dd>{stats.core_posts}</dd></div>
+                  <div><dt>本人回复</dt><dd>{stats.qa_pairs.toLocaleString()}</dd></div>
+                  <div><dt>社区精选</dt><dd>{stats.community_comments}</dd></div>
+                  <div><dt>人工体系切片</dt><dd>{stats.manual_chunks}</dd></div>
+                </dl>
+                <div className="source-note">已纳入《延边刺客短线打板体系》</div>
+              </>
+            )}
           </div>
-          <p className="sidebar-foot">最近同步 · {stats.last_sync.replace("T", " ")}</p>
+          <p className="sidebar-foot">
+            {activeNav === "首板布局"
+              ? "仅使用用户确认的布局快照"
+              : "最近同步 · " + stats.last_sync.replace("T", " ")}
+          </p>
         </aside>
 
         <section className="main-column">
@@ -763,11 +898,11 @@ export default function Home() {
               crawledText={crawledText}
               crawledSource={crawledSource}
               apiKeyConfigured={apiKeyConfigured}
-              apiKey={apiKey}
-              onApiKeyChange={(value) => {
-                setApiKey(value);
-                setActionMessage("");
-              }}
+              availableModels={availableModels}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+              thinkingEnabled={thinkingEnabled}
+              onThinkingEnabledChange={setThinkingEnabled}
               actionMessage={actionMessage}
               isAnalyzing={isAnalyzing}
               generationMode={generationMode}
@@ -811,6 +946,21 @@ export default function Home() {
               onGoToToday={() => setActiveNav("今日复盘")}
             />
           )}
+
+          {activeNav === "首板布局" && (
+            <DragonSection
+              token={token}
+              serviceConnected={connected}
+              defaultTradeDate={reviewDate}
+              model={selectedModel}
+              apiKeyConfigured={apiKeyConfigured}
+              currentReviewText={crawledText}
+              currentReviewSourceUrl={crawledSource}
+              currentReviewSourceTitle={crawledTitle}
+              generatedReview={dragonGeneratedReview}
+              onNotice={showNotice}
+            />
+          )}
         </section>
 
         <aside className="evidence-panel">
@@ -837,7 +987,7 @@ export default function Home() {
               <div className="check-list">
                 <div className={connected ? "done" : ""}><span>{connected ? "✓" : "1"}</span><strong>本机服务</strong><small>{connected ? "已连接" : "需要从启动器进入"}</small></div>
                 <div className={reviewFile || crawledText ? "done" : ""}><span>{reviewFile || crawledText ? "✓" : "2"}</span><strong>每日复盘</strong><small>{reviewFile || crawledText ? "已载入" : "文件或自爬取"}</small></div>
-                <div className={apiKeyConfigured || Boolean(apiKey.trim()) ? "done" : ""}><span>{apiKeyConfigured || apiKey.trim() ? "✓" : "3"}</span><strong>模型密钥</strong><small>{apiKeyConfigured || apiKey.trim() ? "已就绪" : "临时填写即可"}</small></div>
+                <div className={apiKeyConfigured ? "done" : ""}><span>{apiKeyConfigured ? "✓" : "3"}</span><strong>模型密钥</strong><small>{apiKeyConfigured ? "本机已配置" : "请填写本机 .env"}</small></div>
               </div>
               <div className="evidence-rule"><strong>准备完成后</strong><ol><li>清洗同一份原始复盘</li><li>并行生成完整 Excel</li><li>只分析有地位个股并保存 Word</li></ol></div>
             </>
@@ -856,6 +1006,20 @@ export default function Home() {
               <h2>只保存在本机</h2>
               <p className="evidence-intro">Excel 和 Word 都不会上传到站点。历史列表来自本机生成器的 output 目录。</p>
               <div className="evidence-rule"><strong>两类结果分工</strong><ol><li>Excel：完整整理，不新增观点</li><li>Word：只分析有任务和地位的核心个股</li><li>任一失败，成功结果仍会保留</li></ol></div>
+            </>
+          )}
+          {activeNav === "首板布局" && (
+            <>
+              <div className="evidence-header"><span className="eyebrow">首板布局边界</span></div>
+              <h2>四类上下文</h2>
+              <div className="priority-list">
+                <span>A 用户确认的当日复盘</span>
+                <span>B 当日行情与规则检查</span>
+                <span>C 独立历史模型证据</span>
+                <span>D 任务、超预期与失效条件</span>
+              </div>
+              <p className="evidence-intro">基础标准结果保持原样；未通过硬性条件的候选不会进入模型分析。</p>
+              <div className="evidence-rule"><strong>库隔离</strong><ol><li>历史模型：dragon_knowledge.db</li><li>运行记录：dragon_runtime.db</li><li>不会检索现有复盘 RAG</li></ol></div>
             </>
           )}
         </aside>

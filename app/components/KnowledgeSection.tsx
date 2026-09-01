@@ -26,13 +26,13 @@ export function KnowledgeSection({
           <span className="eyebrow">本机 RAG 状态</span>
           <h3>{stats.chunks.toLocaleString()} 条证据已建立检索索引</h3>
           <p>
-            核心 20 篇固定保留；日常只增量维护近期 10 篇。移出近期窗口的帖子会降级归档，仍可检索，不会删除。
+            {stats.qa_pairs.toLocaleString()} 条原始回复已保留，{stats.retrievable_qa.toLocaleString()} 条代表回复进入检索。
           </p>
         </div>
         <button disabled={syncing} onClick={onSync}>
           {syncJob?.status === "running"
-            ? "正在更新…"
-            : "增量更新近期 10 篇"}
+            ? "正在执行…"
+            : "一键更新并语义清洗"}
         </button>
       </section>
       {syncJob &&
@@ -57,7 +57,7 @@ export function KnowledgeSection({
         <article>
           <span>近期补充帖</span>
           <strong>{stats.supplemental_posts}</strong>
-          <small>滚动维护最新 10 篇</small>
+          <small>增量更新近期 10 篇 · 滚动维护最新 10 篇</small>
         </article>
         <article>
           <span>历史归档帖</span>
@@ -67,7 +67,17 @@ export function KnowledgeSection({
         <article>
           <span>本人回复</span>
           <strong>{stats.qa_pairs.toLocaleString()}</strong>
-          <small>作者原始语境优先</small>
+          <small>原文全部保留</small>
+        </article>
+        <article>
+          <span>代表回复</span>
+          <strong>{stats.retrievable_qa.toLocaleString()}</strong>
+          <small>进入主检索索引</small>
+        </article>
+        <article>
+          <span>语义合并</span>
+          <strong>{stats.semantic_duplicates.toLocaleString()}</strong>
+          <small>{stats.semantic_cleaned_at.slice(0, 10)}</small>
         </article>
         <article>
           <span>社区精选</span>
@@ -84,24 +94,6 @@ export function KnowledgeSection({
           <strong className="date-stat">{stats.last_sync.slice(0, 10)}</strong>
           <small>{stats.last_sync.replace("T", " ")}</small>
         </article>
-      </section>
-      <section className="panel cleaning-panel">
-        <span className="eyebrow">清洗规则</span>
-        <h3>什么会保留，什么会被降权</h3>
-        <div className="cleaning-columns">
-          <div>
-            <strong>保留</strong>
-            <p>
-              完整正文、本人有效回复、问题上下文、高赞且有布局信息的评论、人工体系文档。
-            </p>
-          </div>
-          <div>
-            <strong>降权或过滤</strong>
-            <p>
-              重复文本、空话、广告、过短回复、脱离布局语境的泛泛评论以及网页噪声。
-            </p>
-          </div>
-        </div>
       </section>
       <section className="panel source-library-panel">
         <div className="panel-heading">

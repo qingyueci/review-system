@@ -17,6 +17,7 @@
 /.next/
 /.vinext/
 /out/
+/.netlify/
 
 # misc
 .DS_Store
