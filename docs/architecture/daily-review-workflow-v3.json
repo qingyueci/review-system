@@ -1,0 +1,243 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "每日复盘：从输入到双分支结果",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "主流程",
+        "focus": [
+          "input",
+          "normalize",
+          "dedupe",
+          "rag",
+          "split",
+          "save"
+        ],
+        "note": "同一份清洗后的复盘进入两条生成链路。"
+      },
+      {
+        "id": "excel",
+        "label": "Excel 分支",
+        "focus": [
+          "split",
+          "excel",
+          "save"
+        ],
+        "note": "保留完整复盘表格内容。"
+      },
+      {
+        "id": "word",
+        "label": "Word 分支",
+        "focus": [
+          "rag",
+          "split",
+          "word",
+          "save"
+        ],
+        "note": "结合检索证据形成核心布局分析。"
+      },
+      {
+        "id": "retry",
+        "label": "持久化与重试",
+        "focus": [
+          "dedupe",
+          "job",
+          "split",
+          "save",
+          "retry"
+        ],
+        "note": "失败分支可重试，成功结果保留。"
+      }
+    ],
+    "viewBox": [
+      1230,
+      528
+    ]
+  },
+  "lanes": [
+    {
+      "id": "ui",
+      "label": "页面与请求"
+    },
+    {
+      "id": "core",
+      "label": "本机编排"
+    },
+    {
+      "id": "branches",
+      "label": "独立生成分支"
+    }
+  ],
+  "mainPath": [
+    "input",
+    "normalize",
+    "dedupe",
+    "rag",
+    "split",
+    "save"
+  ],
+  "nodes": [
+    {
+      "id": "input",
+      "lane": "ui",
+      "col": 0,
+      "type": "frontend",
+      "label": "输入复盘",
+      "sublabel": "日期或文件"
+    },
+    {
+      "id": "normalize",
+      "lane": "core",
+      "col": 1,
+      "type": "backend",
+      "label": "解析与清洗",
+      "sublabel": "统一正文"
+    },
+    {
+      "id": "dedupe",
+      "lane": "core",
+      "col": 2,
+      "type": "backend",
+      "label": "请求指纹去重",
+      "sublabel": "接回原任务"
+    },
+    {
+      "id": "rag",
+      "lane": "core",
+      "col": 3,
+      "type": "database",
+      "label": "混合检索",
+      "sublabel": "Word按需"
+    },
+    {
+      "id": "split",
+      "lane": "core",
+      "col": 4,
+      "type": "backend",
+      "label": "双分支调度",
+      "sublabel": "按模式执行"
+    },
+    {
+      "id": "save",
+      "lane": "ui",
+      "col": 5,
+      "type": "database",
+      "label": "文件与运行记录",
+      "sublabel": "下载与历史"
+    },
+    {
+      "id": "excel",
+      "lane": "branches",
+      "col": 4,
+      "type": "backend",
+      "label": "Excel 整理",
+      "sublabel": "完整表格"
+    },
+    {
+      "id": "word",
+      "lane": "branches",
+      "col": 5,
+      "type": "backend",
+      "label": "Word 核心分析",
+      "sublabel": "布局分析"
+    },
+    {
+      "id": "job",
+      "lane": "branches",
+      "col": 2,
+      "type": "database",
+      "label": "SQLite 任务",
+      "sublabel": "状态与错误"
+    },
+    {
+      "id": "retry",
+      "lane": "ui",
+      "col": 4,
+      "type": "backend",
+      "label": "失败项单独重试",
+      "sublabel": "成功项保留"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "normalize",
+      "role": "main"
+    },
+    {
+      "from": "normalize",
+      "to": "dedupe",
+      "role": "main"
+    },
+    {
+      "from": "dedupe",
+      "to": "rag",
+      "role": "main"
+    },
+    {
+      "from": "rag",
+      "to": "split",
+      "role": "main"
+    },
+    {
+      "from": "split",
+      "to": "save",
+      "role": "main",
+      "label": "汇总分支结果"
+    },
+    {
+      "from": "split",
+      "to": "excel",
+      "role": "branch",
+      "label": "Excel 分支"
+    },
+    {
+      "from": "split",
+      "to": "word",
+      "role": "branch",
+      "label": "Word 分支"
+    },
+    {
+      "from": "dedupe",
+      "to": "job",
+      "role": "branch",
+      "label": "持久化"
+    },
+    {
+      "from": "retry",
+      "to": "split",
+      "role": "return",
+      "label": "只重试失败项"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "输入",
+      "items": [
+        "日期抓取或文件输入经统一清洗",
+        "运行中相同请求接回原任务"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "生成",
+      "items": [
+        "Excel 和 Word 按模式独立执行",
+        "仅 Word 分支按需检索带来源证据"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "恢复",
+      "items": [
+        "成功分支产物保留",
+        "失败分支可单独重试并记录原因"
+      ]
+    }
+  ]
+}

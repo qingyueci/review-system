@@ -96,7 +96,9 @@ def test_status_requires_token() -> None:
     assert payload["default_model"] == "deepseek-v4-flash"
     assert payload["available_models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
     assert response.json()["service_version"] == "1.9.2"
-    assert response.json()["stats"]["chunks"] > 0
+    # A clean clone starts with an empty local database; status must report its count without requiring private data.
+    assert isinstance(payload["stats"]["chunks"], int)
+    assert payload["stats"]["chunks"] >= 0
 
 
 def test_full_analysis_and_document_history(monkeypatch, tmp_path) -> None:

@@ -1,0 +1,201 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "首板布局：规则驱动的分析闭环",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "prepare",
+        "label": "输入与规则",
+        "focus": [
+          "snapshot",
+          "fields",
+          "rules"
+        ],
+        "note": "快照、字段别名和版本化规则构成分析输入。"
+      },
+      {
+        "id": "decide",
+        "label": "筛选与分析",
+        "focus": [
+          "rules",
+          "evidence",
+          "screen",
+          "analyze"
+        ],
+        "note": "先做硬性筛选，再结合证据批量分析。"
+      },
+      {
+        "id": "audit",
+        "label": "结果与追溯",
+        "focus": [
+          "analyze",
+          "audit",
+          "export"
+        ],
+        "note": "分析记录、审计和导出保留可追溯路径。"
+      }
+    ],
+    "viewBox": [
+      1230,
+      528
+    ]
+  },
+  "lanes": [
+    {
+      "id": "inputs",
+      "label": "输入与配置"
+    },
+    {
+      "id": "analysis",
+      "label": "候选分析"
+    },
+    {
+      "id": "records",
+      "label": "记录与交付"
+    }
+  ],
+  "mainPath": [
+    "snapshot",
+    "fields",
+    "rules",
+    "screen",
+    "analyze",
+    "audit",
+    "export"
+  ],
+  "nodes": [
+    {
+      "id": "snapshot",
+      "lane": "inputs",
+      "col": 0,
+      "type": "frontend",
+      "label": "首板快照",
+      "sublabel": "盘面事实"
+    },
+    {
+      "id": "fields",
+      "lane": "inputs",
+      "col": 1,
+      "type": "backend",
+      "label": "字段与别名",
+      "sublabel": "统一口径"
+    },
+    {
+      "id": "rules",
+      "lane": "inputs",
+      "col": 2,
+      "type": "database",
+      "label": "规则版本",
+      "sublabel": "规则条件"
+    },
+    {
+      "id": "evidence",
+      "lane": "analysis",
+      "col": 2,
+      "type": "database",
+      "label": "证据检索",
+      "sublabel": "来源引用"
+    },
+    {
+      "id": "screen",
+      "lane": "analysis",
+      "col": 3,
+      "type": "backend",
+      "label": "候选筛选",
+      "sublabel": "筛选结果"
+    },
+    {
+      "id": "analyze",
+      "lane": "analysis",
+      "col": 4,
+      "type": "backend",
+      "label": "批量分析",
+      "sublabel": "任务关系"
+    },
+    {
+      "id": "audit",
+      "lane": "records",
+      "col": 4,
+      "type": "database",
+      "label": "任务审计",
+      "sublabel": "过程留痕"
+    },
+    {
+      "id": "export",
+      "lane": "records",
+      "col": 5,
+      "type": "frontend",
+      "label": "展示与导出",
+      "sublabel": "结果追溯"
+    }
+  ],
+  "edges": [
+    {
+      "from": "snapshot",
+      "to": "fields",
+      "role": "main"
+    },
+    {
+      "from": "fields",
+      "to": "rules",
+      "role": "main"
+    },
+    {
+      "from": "rules",
+      "to": "screen",
+      "role": "main"
+    },
+    {
+      "from": "screen",
+      "to": "analyze",
+      "role": "main",
+      "label": "通过候选优先"
+    },
+    {
+      "from": "analyze",
+      "to": "audit",
+      "role": "main"
+    },
+    {
+      "from": "audit",
+      "to": "export",
+      "role": "main"
+    },
+    {
+      "from": "evidence",
+      "to": "analyze",
+      "role": "branch",
+      "label": "带来源证据",
+      "route": "bottom-channel"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "判断顺序",
+      "items": [
+        "快照提供事实，字段别名统一口径",
+        "规则版本决定硬性筛选与失败原因"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "分析顺序",
+      "items": [
+        "通过候选优先，同层按封板时间排序",
+        "证据检索服务于批量分析，不替代原始事实"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "输出边界",
+      "items": [
+        "结果关联规则、证据和任务审计",
+        "前端展示与导出属于最后一步"
+      ]
+    }
+  ]
+}

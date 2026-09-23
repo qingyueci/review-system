@@ -1,26 +1,40 @@
-# Codex 与本机状态
+# Codex and machine state
 .agents/
 .codex/
 *.log
+/CURRENT_STATUS.md
+/review-cockpit-site/
+/outputs/
 
-# 前端单独维护自己的 Git 历史
-review-cockpit-site/
-
-# Python 本地环境与缓存
+# Python environments, caches, runtime data, and local output
 **/.venv/
 **/__pycache__/
 **/.pytest_cache/
 **/*.py[cod]
-
-# 密钥、本机数据库和生成文件
 **/.env
 **/data/
 **/output/
-_output/
+**/_output/
 
-# 用户原始复盘与策略资料不进入代码仓库
-2025/
-2026/
-*.docx
+# Frontend dependencies and build artifacts
+**/node_modules/
+**/.next/
+**/.vinext/
+**/.netlify/
+**/dist/
+**/.wrangler/
+
+# Local raw review archives and spreadsheets
+/2025/
+/2026/
+/2026新版/
+/复盘obsidian/
+/上色记录_20260821/
+/excel/
 *.xlsx
 *.xls
+*.docx
+!/延边刺客短线打板体系.docx
+
+# Per-account deployment settings; keep only the template
+**/.openai/hosting.json

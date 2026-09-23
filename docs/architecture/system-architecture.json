@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "复盘驾驶舱：系统架构与功能边界",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {"url":"https://github.com/qingyueci/review-system.git","revision":"92876cb04a3d1d06e0a2727d712143d73e0b1c21"},
+    "viewBox": [1380, 850],
+    "views": [
+      {"id":"main","label":"每日复盘主链路","focus":["site","api","fetch","knowledge","generation","artifacts"],"note":"从页面操作到本机生成结果。"},
+      {"id":"rag","label":"知识库与证据","focus":["fetch","knowledge","manual","generation"],"note":"公开资料与人工体系进入混合检索，再参与分析。"},
+      {"id":"dragon","label":"首板布局分析","focus":["site","api","dragon","dragonStore"],"note":"独立的快照、规则、筛选、分析和审计链路。"},
+      {"id":"persistence","label":"本机持久化","focus":["api","jobs","knowledge","artifacts","dragonStore"],"note":"任务、知识和导出文件留在本机。"}
+    ]
+  },
+  "components": [
+    {"id":"site","type":"frontend","label":"驾驶舱前端","sublabel":"复盘 / 布局 / 知识 / 历史","pos":[40,330],"size":[210,82]},
+    {"id":"api","type":"backend","label":"本机 FastAPI","sublabel":"令牌校验 · API 编排 · 异步任务","pos":[330,330],"size":[210,82],"sources":[{"path":"自动复盘表格生成器/review_app/api.py","line":94}]},
+    {"id":"fetch","type":"backend","label":"抓取与预处理","sublabel":"指定日期公开复盘 → 清洗正文","pos":[620,100],"size":[205,82],"sources":[{"path":"自动复盘表格生成器/review_app/crawler.py"},{"path":"自动复盘表格生成器/review_app/preprocessing.py"}]},
+    {"id":"knowledge","type":"database","label":"知识库与混合检索","sublabel":"核心 / 近期 / 归档 · BM25 + 向量","pos":[940,100],"size":[220,82],"sources":[{"path":"自动复盘表格生成器/review_app/knowledge.py"}]},
+    {"id":"manual","type":"external","label":"人工体系文档","sublabel":"内容哈希增量导入","pos":[940,250],"size":[220,74],"sources":[{"path":"自动复盘表格生成器/review_app/knowledge.py"}]},
+    {"id":"generation","type":"backend","label":"Excel / Word 生成","sublabel":"双分支独立执行 · 失败项重试","pos":[620,330],"size":[205,82],"sources":[{"path":"自动复盘表格生成器/review_app/generation_service.py"}]},
+    {"id":"artifacts","type":"database","label":"本机输出文件","sublabel":"Excel / Word · 列表与下载","pos":[940,430],"size":[220,82],"sources":[{"path":"自动复盘表格生成器/review_app/artifact_store.py"}]},
+    {"id":"jobs","type":"database","label":"任务 SQLite","sublabel":"状态 / 分支耗时 / 错误 / 用量","pos":[330,570],"size":[210,82],"sources":[{"path":"自动复盘表格生成器/review_app/job_store.py"}]},
+    {"id":"dragon","type":"backend","label":"首板布局服务","sublabel":"快照 → 规则 → 候选 → 批量分析","pos":[620,570],"size":[205,82],"sources":[{"path":"自动复盘表格生成器/review_app/dragon/router.py","line":297},{"path":"自动复盘表格生成器/review_app/dragon/pipeline.py"}]},
+    {"id":"dragonStore","type":"database","label":"布局证据与审计","sublabel":"版本 / 文档 / 分析记录 / 导出","pos":[940,650],"size":[220,82],"sources":[{"path":"自动复盘表格生成器/review_app/dragon/store.py"}]}
+  ],
+  "connections": [
+    {"from":"site","to":"api","label":"本机 API + 令牌","variant":"emphasis"},
+    {"from":"api","to":"generation","label":"发起生成","variant":"emphasis","labelAt":[675,445]},
+    {"from":"api","to":"fetch","label":"抓取 / 清洗"},
+    {"from":"fetch","to":"knowledge","label":"增量入库"},
+    {"from":"knowledge","to":"generation","label":"检索证据"},
+    {"from":"manual","to":"knowledge","label":"增量导入"},
+    {"from":"generation","to":"artifacts","label":"保存结果"},
+    {"from":"api","to":"jobs","label":"持久化任务","labelDy":24},
+    {"from":"api","to":"dragon","label":"独立布局 API"},
+    {"from":"dragon","to":"dragonStore","label":"记录分析与审计"}
+  ],
+  "cards": [
+    {"dot":"cyan","title":"使用侧","items":["前端与本机服务分属两个 Git 仓库","本机服务仅监听 127.0.0.1"]},
+    {"dot":"emerald","title":"生成侧","items":["同一清洗结果进入 Excel 和 Word 两条链路","任务去重、状态持久化、失败分支单独重试"]},
+    {"dot":"violet","title":"布局侧","items":["规则与证据先于候选分析","布局链路与每日复盘生成相互独立"]}
+  ]
+}
